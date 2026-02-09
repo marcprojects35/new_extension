@@ -272,7 +272,7 @@ class PopupUI {
             const testApi = new TeamPassAPI(url);
             const response = await fetch(`${testApi.apiUrl}/authorize`, { method: 'GET' });
             
-            if ([200, 400, 401, 405].includes(response.status)) {
+            if ([200, 400, 401, 405, 422].includes(response.status)) {
                 this.showStatus('config', '✓ Conexão OK!', 'success');
             } else {
                 this.showStatus('config', `Erro ${response.status}`, 'error');
