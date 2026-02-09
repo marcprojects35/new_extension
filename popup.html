@@ -17,38 +17,22 @@
                 <label>URL do Servidor:</label>
                 <input type="text" id="server-url" value="https://cofredesenha.grupofgf.com.br:4041" />
             </div>
-            <div class="status" id="config-status"></div>
-            <div class="button-group">
-                <button id="test-connection" class="btn btn-secondary">Testar Conexão</button>
-                <button id="save-config" class="btn btn-primary">Salvar</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Tela de Login -->
-    <div id="login-screen" class="screen" style="display: none;">
-        <div class="header">
-            <h2>🔐 Cofre de Senhas FGF</h2>
-        </div>
-        <div class="content">
             <div class="form-group">
                 <label>Usuário:</label>
-                <input type="text" id="username" placeholder="Seu usuário TeamPass" />
+                <input type="text" id="config-username" placeholder="Seu usuário TeamPass" />
             </div>
             <div class="form-group">
                 <label>Senha:</label>
-                <input type="password" id="password" placeholder="Sua senha" />
+                <input type="password" id="config-password" placeholder="Sua senha" />
             </div>
             <div class="form-group">
                 <label>API Key:</label>
-                <input type="text" id="apikey" placeholder="Sua chave API" />
+                <input type="text" id="config-apikey" placeholder="Sua chave API" />
             </div>
-            <div class="status" id="login-status"></div>
+            <div class="status" id="config-status"></div>
             <div class="button-group">
-                <button id="login-btn" class="btn btn-primary">Entrar</button>
-            </div>
-            <div class="footer-link">
-                <a href="#" id="goto-config">⚙️ Configurar servidor</a>
+                <button id="test-connection" class="btn btn-secondary">Testar Conexão</button>
+                <button id="save-config" class="btn btn-primary">Salvar e Conectar</button>
             </div>
         </div>
     </div>

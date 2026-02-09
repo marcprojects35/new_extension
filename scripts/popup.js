@@ -26,8 +26,7 @@ class TeamPassAPI {
                     return {
                         success: true,
                         user: {
-                            username: payload.username || username,
-                            email: payload.email || ''
+                            username: payload.username || username
                         }
                     };
                 }
@@ -62,13 +61,13 @@ class TeamPassAPI {
         for (let id = 1; id <= maxId; id++) {
             try {
                 const item = await this.getItemById(id);
-                if (item && item.login && item.pw) {
+                if (item && item.login && item.pwd) {
                     items.push({
                         id: item.id,
                         label: item.label || '',
                         description: item.description || '',
                         login: item.login,
-                        password: item.pw,
+                        password: item.pwd,
                         url: item.url || '',
                         folder: item.folder_label || ''
                     });
@@ -181,18 +180,32 @@ class PopupUI {
     async init() {
         // Carregar estado
         const state = await AppState.load();
-        
-        // Verificar se tem configuração
-        if (!state.config || !state.config.api_url) {
+
+        // Verificar se tem configuração completa
+        if (!state.config || !state.config.api_url || !state.config.username || !state.config.password || !state.config.apikey) {
+            // Preencher campos com valores salvos parcialmente
+            if (state.config) {
+                if (state.config.api_url) document.getElementById('server-url').value = state.config.api_url;
+                if (state.config.username) document.getElementById('config-username').value = state.config.username;
+                if (state.config.password) document.getElementById('config-password').value = state.config.password;
+                if (state.config.apikey) document.getElementById('config-apikey').value = state.config.apikey;
+            }
             this.showScreen('config');
+            this.setupEventListeners();
             return;
         }
+
+        // Preencher campos da config com valores salvos
+        document.getElementById('server-url').value = state.config.api_url;
+        document.getElementById('config-username').value = state.config.username;
+        document.getElementById('config-password').value = state.config.password;
+        document.getElementById('config-apikey').value = state.config.apikey;
 
         // Verificar se tem sessão ativa
         if (state.session && state.session.token) {
             this.api = new TeamPassAPI(state.config.api_url);
             this.api.token = state.session.token;
-            
+
             // Carregar credenciais do cache ou buscar novas
             if (state.credentials && state.credentials.length > 0) {
                 this.credentials = state.credentials;
@@ -202,8 +215,11 @@ class PopupUI {
                 await this.refreshCredentials();
             }
         } else {
+            // Tentar auto-login com credenciais salvas
             this.api = new TeamPassAPI(state.config.api_url);
-            this.showScreen('login');
+            this.showScreen('config');
+            this.showStatus('config', 'Conectando automaticamente...', 'info');
+            await this.autoLogin(state.config);
         }
 
         this.setupEventListeners();
@@ -213,26 +229,22 @@ class PopupUI {
         // Config screen
         document.getElementById('test-connection')?.addEventListener('click', () => this.testConnection());
         document.getElementById('save-config')?.addEventListener('click', () => this.saveConfig());
-        
-        // Login screen
-        document.getElementById('login-btn')?.addEventListener('click', () => this.login());
-        document.getElementById('goto-config')?.addEventListener('click', () => this.showScreen('config'));
-        
+
         // Main screen
         document.getElementById('logout-btn')?.addEventListener('click', () => this.logout());
         document.getElementById('refresh-btn')?.addEventListener('click', () => this.refreshCredentials());
         document.getElementById('search-box')?.addEventListener('input', (e) => this.filterCredentials(e.target.value));
-        
-        // Enter key nos inputs
-        ['username', 'password', 'apikey'].forEach(id => {
+
+        // Enter key nos inputs da config
+        ['config-username', 'config-password', 'config-apikey'].forEach(id => {
             document.getElementById(id)?.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') this.login();
+                if (e.key === 'Enter') this.saveConfig();
             });
         });
     }
 
     showScreen(screenName) {
-        ['config-screen', 'login-screen', 'main-screen'].forEach(id => {
+        ['config-screen', 'main-screen'].forEach(id => {
             document.getElementById(id).style.display = 'none';
         });
         document.getElementById(`${screenName}-screen`).style.display = 'flex';
@@ -272,29 +284,31 @@ class PopupUI {
 
     async saveConfig() {
         const url = document.getElementById('server-url').value.trim();
-        if (!url) return;
+        const username = document.getElementById('config-username').value.trim();
+        const password = document.getElementById('config-password').value.trim();
+        const apikey = document.getElementById('config-apikey').value.trim();
 
-        await AppState.save('config', { api_url: url });
-        this.api = new TeamPassAPI(url);
-        this.showScreen('login');
-    }
-
-    async login() {
-        const username = document.getElementById('username').value.trim();
-        const password = document.getElementById('password').value.trim();
-        const apikey = document.getElementById('apikey').value.trim();
-
-        if (!username || !password || !apikey) {
-            this.showStatus('login', 'Preencha todos os campos', 'error');
+        if (!url || !username || !password || !apikey) {
+            this.showStatus('config', 'Preencha todos os campos', 'error');
             return;
         }
 
-        this.showStatus('login', 'Autenticando...', 'info');
+        const config = { api_url: url, username, password, apikey };
+        await AppState.save('config', config);
+        this.api = new TeamPassAPI(url);
 
-        const result = await this.api.authenticate(username, password, apikey);
+        this.showStatus('config', 'Conectando ao TeamPass...', 'info');
+        await this.autoLogin(config);
+    }
+
+    async autoLogin(config) {
+        if (!this.api) {
+            this.api = new TeamPassAPI(config.api_url);
+        }
+
+        const result = await this.api.authenticate(config.username, config.password, config.apikey);
 
         if (result.success) {
-            // Salvar sessão
             await AppState.save('session', {
                 token: this.api.token,
                 user: result.user
@@ -303,7 +317,7 @@ class PopupUI {
             this.showMainScreen(result.user);
             await this.refreshCredentials();
         } else {
-            this.showStatus('login', result.error, 'error');
+            this.showStatus('config', 'Falha na autenticação: ' + result.error, 'error');
         }
     }
 
@@ -311,8 +325,8 @@ class PopupUI {
         await AppState.clear('session');
         await AppState.clear('credentials');
         this.credentials = [];
-        this.api.token = null;
-        this.showScreen('login');
+        if (this.api) this.api.token = null;
+        this.showScreen('config');
     }
 
     async showMainScreen(user) {

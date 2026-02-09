@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teste - Cofre de Senhas FGF - Autocomplete e Detecção</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+        h1 { color: #0077b6; text-align: center; margin-bottom: 30px; }
+        h2 { color: #00b4d8; margin-bottom: 15px; font-size: 18px; }
+        .test-section {
+            background: #16213e;
+            border: 1px solid #0077b6;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            max-width: 500px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .test-section.pass { border-color: #2ecc71; }
+        .test-section.fail { border-color: #e74c3c; }
+        .status-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status-badge.waiting { background: #f39c12; color: #000; }
+        .status-badge.pass { background: #2ecc71; color: #000; }
+        .status-badge.fail { background: #e74c3c; color: #fff; }
+        label { display: block; margin-bottom: 5px; color: #aaa; font-size: 14px; }
+        input {
+            width: 100%;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            border: 1px solid #333;
+            border-radius: 6px;
+            background: #0f3460;
+            color: #fff;
+            font-size: 14px;
+        }
+        input:focus { outline: none; border-color: #0077b6; }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            margin: 5px;
+        }
+        .btn-test { background: #0077b6; color: #fff; }
+        .btn-test:hover { background: #005f8a; }
+        .btn-run-all { background: #2ecc71; color: #000; font-size: 16px; padding: 12px 30px; }
+        .btn-run-all:hover { background: #27ae60; }
+        .btn-reset { background: #e74c3c; color: #fff; }
+        .result-box {
+            background: #0a0a1a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        .controls { text-align: center; margin: 20px 0; }
+        .summary {
+            text-align: center;
+            font-size: 20px;
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 10px;
+            background: #16213e;
+        }
+        .form-group { margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+
+    <h1>Teste do Cofre de Senhas FGF</h1>
+    <p style="text-align:center; color:#aaa; margin-bottom:20px;">
+        Abra esta pagina no Chrome com a extensao instalada.<br>
+        Clique em "Executar Todos os Testes" ou use a extensao para preencher cada formulario.
+    </p>
+
+    <div class="controls">
+        <button class="btn-run-all" onclick="runAllTests()">Executar Todos os Testes</button>
+        <button class="btn-reset" onclick="resetAll()">Limpar Tudo</button>
+    </div>
+
+    <div id="summary" class="summary" style="display:none;"></div>
+
+    <!-- TESTE 1: Formulário padrão simples -->
+    <div class="test-section" id="test1-section">
+        <h2>Teste 1: Login Padrao <span class="status-badge waiting" id="test1-badge">Aguardando</span></h2>
+        <p style="color:#aaa; font-size:12px; margin-bottom:10px;">Formulario com campos username (text) e password</p>
+        <form id="test1-form">
+            <div class="form-group">
+                <label for="username">Usuario:</label>
+                <input type="text" id="username" name="username" placeholder="Digite seu usuario" autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label for="password">Senha:</label>
+                <input type="password" id="password" name="password" placeholder="Digite sua senha" autocomplete="current-password">
+            </div>
+            <button type="button" class="btn-test" onclick="checkTest(1)">Verificar Deteccao</button>
+        </form>
+        <div class="result-box" id="test1-result"></div>
+    </div>
+
+    <!-- TESTE 2: Formulário com email -->
+    <div class="test-section" id="test2-section">
+        <h2>Teste 2: Login com Email <span class="status-badge waiting" id="test2-badge">Aguardando</span></h2>
+        <p style="color:#aaa; font-size:12px; margin-bottom:10px;">Formulario com campo email e password</p>
+        <form id="test2-form">
+            <div class="form-group">
+                <label for="email-login">Email:</label>
+                <input type="email" id="email-login" name="email" placeholder="seu@email.com" autocomplete="email">
+            </div>
+            <div class="form-group">
+                <label for="pass2">Senha:</label>
+                <input type="password" id="pass2" name="passwd" placeholder="Sua senha">
+            </div>
+            <button type="button" class="btn-test" onclick="checkTest(2)">Verificar Deteccao</button>
+        </form>
+        <div class="result-box" id="test2-result"></div>
+    </div>
+
+    <!-- TESTE 3: Formulário sem atributos claros -->
+    <div class="test-section" id="test3-section">
+        <h2>Teste 3: Campos sem atributos claros <span class="status-badge waiting" id="test3-badge">Aguardando</span></h2>
+        <p style="color:#aaa; font-size:12px; margin-bottom:10px;">Campos com nomes genericos - testa deteccao por contexto visual</p>
+        <form id="test3-form">
+            <div class="form-group">
+                <label for="field1">Acesso:</label>
+                <input type="text" id="field1" name="field1" placeholder="Informe aqui">
+            </div>
+            <div class="form-group">
+                <label for="field2">Codigo:</label>
+                <input type="password" id="field2" name="field2" placeholder="Informe aqui">
+            </div>
+            <button type="button" class="btn-test" onclick="checkTest(3)">Verificar Deteccao</button>
+        </form>
+        <div class="result-box" id="test3-result"></div>
+    </div>
+
+    <!-- TESTE 4: Formulário com campos extras (não login) -->
+    <div class="test-section" id="test4-section">
+        <h2>Teste 4: Formulario com campos extras <span class="status-badge waiting" id="test4-badge">Aguardando</span></h2>
+        <p style="color:#aaa; font-size:12px; margin-bottom:10px;">Formulario com campo de busca + login - testa se ignora o campo de busca</p>
+        <form id="test4-form">
+            <div class="form-group">
+                <label for="search-box">Buscar:</label>
+                <input type="text" id="search-box-test" name="search" placeholder="Buscar..." autocomplete="off">
+            </div>
+            <div class="form-group">
+                <label for="login-user">Login:</label>
+                <input type="text" id="login-user" name="login" placeholder="Seu login">
+            </div>
+            <div class="form-group">
+                <label for="login-pass">Senha:</label>
+                <input type="password" id="login-pass" name="password" placeholder="Sua senha">
+            </div>
+            <button type="button" class="btn-test" onclick="checkTest(4)">Verificar Deteccao</button>
+        </form>
+        <div class="result-box" id="test4-result"></div>
+    </div>
+
+    <!-- TESTE 5: Teste de preenchimento real -->
+    <div class="test-section" id="test5-section">
+        <h2>Teste 5: Preenchimento Manual <span class="status-badge waiting" id="test5-badge">Aguardando</span></h2>
+        <p style="color:#aaa; font-size:12px; margin-bottom:10px;">Use a extensao para preencher estes campos. Depois clique em verificar.</p>
+        <form id="test5-form">
+            <div class="form-group">
+                <label for="user-fill">Usuario:</label>
+                <input type="text" id="user-fill" name="username" placeholder="Preencha via extensao">
+            </div>
+            <div class="form-group">
+                <label for="pass-fill">Senha:</label>
+                <input type="password" id="pass-fill" name="password" placeholder="Preencha via extensao">
+            </div>
+            <button type="button" class="btn-test" onclick="checkFill()">Verificar Preenchimento</button>
+        </form>
+        <div class="result-box" id="test5-result"></div>
+    </div>
+
+    <script>
+        // Simular a logica de deteccao do content script para validar
+        const usernamePatterns = {
+            exact: ['username', 'user', 'login', 'email', 'userid', 'user-name', 'user_name', 'userName', 'account', 'identifier', 'loginid'],
+            partial: ['user', 'login', 'email', 'account', 'id', 'name', 'mail', 'usuario', 'conta', 'acesso', 'identifier'],
+            negative: ['search', 'query', 'filter', 'first', 'last', 'display', 'full', 'company', 'organization', 'busca', 'pesqui']
+        };
+
+        const passwordPatterns = {
+            exact: ['password', 'passwd', 'pwd', 'pass', 'senha', 'secret', 'pin'],
+            partial: ['password', 'passwd', 'pwd', 'pass', 'senha', 'secret', 'pin', 'code'],
+            negative: ['captcha', 'confirm', 'repeat', 'new', 'old', 'current', 'retype', 'again', 'verificat', 'confirmation', 'confirma']
+        };
+
+        function getFieldInfo(input) {
+            return {
+                tag: input.tagName,
+                type: input.type,
+                name: input.name,
+                id: input.id,
+                placeholder: input.placeholder,
+                autocomplete: input.autocomplete
+            };
+        }
+
+        function detectUsernameIn(form) {
+            const inputs = form.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"]');
+            let best = null;
+            let bestScore = -1;
+
+            inputs.forEach(input => {
+                let score = 0;
+                const name = (input.name || '').toLowerCase();
+                const id = (input.id || '').toLowerCase();
+                const type = input.type.toLowerCase();
+                const autocomplete = (input.autocomplete || '').toLowerCase();
+
+                if (type === 'email') score += 60;
+                if (type === 'text') score += 25;
+                if (usernamePatterns.exact.some(p => name === p)) score += 40;
+                if (usernamePatterns.exact.some(p => id === p)) score += 40;
+                if (usernamePatterns.partial.some(p => name.includes(p))) score += 20;
+                if (usernamePatterns.partial.some(p => id.includes(p))) score += 20;
+                if (['username', 'email', 'tel'].some(h => autocomplete.includes(h))) score += 50;
+                if (usernamePatterns.negative.some(p => name.includes(p) || id.includes(p))) score -= 30;
+
+                // Bonus: password field exists after
+                const hasPasswordAfter = form.querySelector('input[type="password"]') !== null;
+                if (hasPasswordAfter) score += 30;
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = { input, score };
+                }
+            });
+
+            return best;
+        }
+
+        function detectPasswordIn(form) {
+            const inputs = form.querySelectorAll('input[type="password"]');
+            let best = null;
+            let bestScore = -1;
+
+            inputs.forEach(input => {
+                let score = 150; // type=password base
+                const name = (input.name || '').toLowerCase();
+                const id = (input.id || '').toLowerCase();
+
+                if (passwordPatterns.exact.some(p => name === p)) score += 35;
+                if (passwordPatterns.exact.some(p => id === p)) score += 35;
+                if (inputs.length === 1) score += 40;
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = { input, score };
+                }
+            });
+
+            return best;
+        }
+
+        function checkTest(testNum) {
+            const form = document.getElementById(`test${testNum}-form`);
+            const resultBox = document.getElementById(`test${testNum}-result`);
+            const badge = document.getElementById(`test${testNum}-badge`);
+            const section = document.getElementById(`test${testNum}-section`);
+
+            const userResult = detectUsernameIn(form);
+            const passResult = detectPasswordIn(form);
+
+            let output = '';
+            let passed = true;
+
+            output += '=== DETECCAO DE USERNAME ===\n';
+            if (userResult) {
+                const info = getFieldInfo(userResult.input);
+                output += `Encontrado: #${info.id} name="${info.name}" type="${info.type}"\n`;
+                output += `Score: ${userResult.score}\n`;
+            } else {
+                output += 'NAO ENCONTRADO\n';
+                passed = false;
+            }
+
+            output += '\n=== DETECCAO DE PASSWORD ===\n';
+            if (passResult) {
+                const info = getFieldInfo(passResult.input);
+                output += `Encontrado: #${info.id} name="${info.name}" type="${info.type}"\n`;
+                output += `Score: ${passResult.score}\n`;
+            } else {
+                output += 'NAO ENCONTRADO\n';
+                passed = false;
+            }
+
+            // Teste 4 especifico: verificar se nao pegou o campo de busca
+            if (testNum === 4 && userResult) {
+                if (userResult.input.name === 'search' || userResult.input.id === 'search-box-test') {
+                    output += '\n!!! FALHA: Detectou campo de busca como username !!!\n';
+                    passed = false;
+                } else {
+                    output += '\nOK: Ignorou campo de busca corretamente\n';
+                }
+            }
+
+            resultBox.textContent = output;
+            badge.textContent = passed ? 'PASSOU' : 'FALHOU';
+            badge.className = `status-badge ${passed ? 'pass' : 'fail'}`;
+            section.className = `test-section ${passed ? 'pass' : 'fail'}`;
+
+            return passed;
+        }
+
+        function checkFill() {
+            const userField = document.getElementById('user-fill');
+            const passField = document.getElementById('pass-fill');
+            const resultBox = document.getElementById('test5-result');
+            const badge = document.getElementById('test5-badge');
+            const section = document.getElementById('test5-section');
+
+            const userFilled = userField.value.length > 0;
+            const passFilled = passField.value.length > 0;
+            const passed = userFilled && passFilled;
+
+            let output = '=== VERIFICACAO DE PREENCHIMENTO ===\n';
+            output += `Usuario: ${userFilled ? 'PREENCHIDO (' + userField.value + ')' : 'VAZIO'}\n`;
+            output += `Senha: ${passFilled ? 'PREENCHIDO (' + '*'.repeat(passField.value.length) + ')' : 'VAZIO'}\n`;
+            output += `\nResultado: ${passed ? 'SUCESSO - Ambos preenchidos!' : 'FALHA - Campos vazios'}`;
+
+            resultBox.textContent = output;
+            badge.textContent = passed ? 'PASSOU' : 'FALHOU';
+            badge.className = `status-badge ${passed ? 'pass' : 'fail'}`;
+            section.className = `test-section ${passed ? 'pass' : 'fail'}`;
+
+            return passed;
+        }
+
+        function runAllTests() {
+            let passed = 0;
+            let total = 4; // Testes 1-4 (automaticos)
+
+            for (let i = 1; i <= 4; i++) {
+                if (checkTest(i)) passed++;
+            }
+
+            const summary = document.getElementById('summary');
+            summary.style.display = 'block';
+            summary.innerHTML = `<strong>Resultado: ${passed}/${total} testes de deteccao passaram</strong><br>
+                <span style="color:#aaa; font-size:14px;">Teste 5 requer preenchimento manual via extensao</span>`;
+            summary.style.borderColor = passed === total ? '#2ecc71' : '#e74c3c';
+        }
+
+        function resetAll() {
+            // Limpar todos os campos
+            document.querySelectorAll('input').forEach(input => input.value = '');
+            // Resetar badges
+            for (let i = 1; i <= 5; i++) {
+                const badge = document.getElementById(`test${i}-badge`);
+                const section = document.getElementById(`test${i}-section`);
+                const result = document.getElementById(`test${i}-result`);
+                if (badge) { badge.textContent = 'Aguardando'; badge.className = 'status-badge waiting'; }
+                if (section) { section.className = 'test-section'; }
+                if (result) { result.textContent = ''; }
+            }
+            document.getElementById('summary').style.display = 'none';
+        }
+    </script>
+
+</body>
+</html>

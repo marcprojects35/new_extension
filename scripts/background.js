@@ -29,17 +29,50 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 // Verificar token periodicamente (a cada hora)
 setInterval(async () => {
-    const { session } = await chrome.storage.local.get('session');
-    
+    const { session, config } = await chrome.storage.local.get(['session', 'config']);
+
     if (session && session.token) {
-        // Verificar se o token ainda é válido
         try {
             const payload = JSON.parse(atob(session.token.split('.')[1]));
-            const expiration = payload.exp * 1000; // Converter para ms
-            
+            const expiration = payload.exp * 1000;
+
             if (Date.now() > expiration) {
-                console.log('Token expirado - limpando sessão');
+                console.log('Token expirado - tentando re-autenticar');
                 await chrome.storage.local.remove(['session', 'credentials']);
+
+                // Tentar re-autenticar com credenciais salvas na config
+                if (config && config.username && config.password && config.apikey) {
+                    try {
+                        const apiUrl = config.api_url.replace(/\/$/, '') + '/api/index.php';
+                        const response = await fetch(`${apiUrl}/authorize`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                login: config.username,
+                                password: config.password,
+                                apikey: config.apikey
+                            })
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+                            if (result.token) {
+                                const newPayload = JSON.parse(atob(result.token.split('.')[1]));
+                                await chrome.storage.local.set({
+                                    session: {
+                                        token: result.token,
+                                        user: {
+                                            username: newPayload.username || config.username
+                                        }
+                                    }
+                                });
+                                console.log('Re-autenticação automática bem-sucedida');
+                            }
+                        }
+                    } catch (reAuthError) {
+                        console.error('Erro na re-autenticação:', reAuthError);
+                    }
+                }
             }
         } catch (error) {
             console.error('Erro ao verificar token:', error);

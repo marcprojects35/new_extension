@@ -129,7 +129,8 @@
          * Verifica se um elemento está visível COM ANÁLISE PROFUNDA
          */
         isVisible(element) {
-            if (!element || !element.offsetParent) {
+            if (!element) return false;
+            if (!element.offsetParent) {
                 // Verificar se é position: fixed ou absolute que pode estar visível
                 const style = window.getComputedStyle(element);
                 if (style.position === 'fixed' || style.position === 'absolute') {
