@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cofre de Senhas FGF</title>
+    <link rel="stylesheet" href="styles/popup.css">
+</head>
+<body>
+    <!-- Tela de Configuração -->
+    <div id="config-screen" class="screen" style="display: none;">
+        <div class="header">
+            <h2>⚙️ Configuração</h2>
+        </div>
+        <div class="content">
+            <div class="form-group">
+                <label>URL do Servidor:</label>
+                <input type="text" id="server-url" value="https://cofredesenha.grupofgf.com.br:4041" />
+            </div>
+            <div class="status" id="config-status"></div>
+            <div class="button-group">
+                <button id="test-connection" class="btn btn-secondary">Testar Conexão</button>
+                <button id="save-config" class="btn btn-primary">Salvar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tela de Login -->
+    <div id="login-screen" class="screen" style="display: none;">
+        <div class="header">
+            <h2>🔐 Cofre de Senhas FGF</h2>
+        </div>
+        <div class="content">
+            <div class="form-group">
+                <label>Usuário:</label>
+                <input type="text" id="username" placeholder="Seu usuário TeamPass" />
+            </div>
+            <div class="form-group">
+                <label>Senha:</label>
+                <input type="password" id="password" placeholder="Sua senha" />
+            </div>
+            <div class="form-group">
+                <label>API Key:</label>
+                <input type="text" id="apikey" placeholder="Sua chave API" />
+            </div>
+            <div class="status" id="login-status"></div>
+            <div class="button-group">
+                <button id="login-btn" class="btn btn-primary">Entrar</button>
+            </div>
+            <div class="footer-link">
+                <a href="#" id="goto-config">⚙️ Configurar servidor</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tela Principal -->
+    <div id="main-screen" class="screen" style="display: none;">
+        <div class="header">
+            <h2>🔑 Credenciais</h2>
+            <div class="user-info">
+                <span id="user-name"></span>
+                <button id="logout-btn" class="btn-icon" title="Sair">🚪</button>
+            </div>
+        </div>
+        
+        <div class="toolbar">
+            <input type="text" id="search-box" placeholder="🔍 Buscar credenciais..." />
+            <button id="refresh-btn" class="btn-icon" title="Atualizar">🔄</button>
+        </div>
+
+        <div id="current-url-info" class="url-info" style="display: none;">
+            <div class="url-label">📍 Página atual:</div>
+            <div class="url-value" id="current-url"></div>
+        </div>
+
+        <div id="credentials-list" class="credentials-list">
+            <div class="loading">Carregando credenciais...</div>
+        </div>
+
+        <div class="footer">
+            <div class="stats">
+                <span id="credentials-count">0 credenciais</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="scripts/popup.js"></script>
+</body>
+</html>
