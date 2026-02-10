@@ -1393,14 +1393,14 @@
     let formDetected = false;
     let autofillPopupShown = false;
 
-    // Buscar credenciais que correspondem à URL atual
-    async function getMatchingCredentials() {
+    // Buscar credenciais do storage
+    async function getStoredCredentials() {
         return new Promise((resolve) => {
-            chrome.storage.local.get(['credentials', 'session'], (data) => {
-                if (!data.session || !data.credentials || data.credentials.length === 0) {
-                    resolve([]);
-                    return;
-                }
+            chrome.storage.local.get(['credentials', 'session', 'config'], (data) => {
+                const hasSession = !!(data.session && data.session.token);
+                const hasConfig = !!(data.config && data.config.api_url && data.config.username);
+                const config = data.config || null;
+                const allCreds = data.credentials || [];
 
                 const currentUrl = window.location.href;
                 let domain = '';
@@ -1410,8 +1410,7 @@
                     domain = currentUrl;
                 }
 
-                // Calcular match e filtrar
-                const matched = data.credentials.map(cred => {
+                const withScores = allCreds.map(cred => {
                     const credUrl = (cred.url || '').toLowerCase();
                     const credLabel = (cred.label || '').toLowerCase();
                     const domainLower = domain.toLowerCase();
@@ -1421,7 +1420,6 @@
                     if (credUrl && domainLower.includes(credUrl.replace(/https?:\/\//, '').split('/')[0])) score += 80;
                     if (credLabel.includes(domainLower.split('.')[0])) score += 50;
 
-                    // Fuzzy: partes do domínio no label ou URL
                     const domainParts = domainLower.split('.').filter(p => p.length > 2);
                     domainParts.forEach(part => {
                         if (credLabel.includes(part)) score += 30;
@@ -1429,12 +1427,140 @@
                     });
 
                     return { ...cred, matchScore: score };
-                }).filter(c => c.matchScore > 0)
-                  .sort((a, b) => b.matchScore - a.matchScore);
+                });
 
-                resolve(matched);
+                const matched = withScores.filter(c => c.matchScore > 0).sort((a, b) => b.matchScore - a.matchScore);
+                const all = withScores.sort((a, b) => b.matchScore - a.matchScore);
+
+                resolve({ matched, all, hasSession, hasConfig, config });
             });
         });
+    }
+
+    // Autenticar e buscar credenciais diretamente do content script
+    async function authenticateAndFetch(config) {
+        const baseUrl = config.api_url.replace(/\/$/, '');
+        const apiUrl = `${baseUrl}/api/index.php`;
+        const authUrl = `${apiUrl}/authorize`;
+
+        log('Autenticando diretamente do content script...');
+
+        // Tentar autenticar com as 3 estratégias
+        const strategies = [
+            { label: 'form-urlencoded', options: {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ login: config.username, password: config.password, apikey: config.apikey })
+            }},
+            { label: 'json', options: {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ login: config.username, password: config.password, apikey: config.apikey })
+            }},
+            { label: 'json-no-header', options: {
+                method: 'POST',
+                body: JSON.stringify({ login: config.username, password: config.password, apikey: config.apikey })
+            }}
+        ];
+
+        let token = null;
+        let authMode = null;
+
+        for (const strategy of strategies) {
+            try {
+                const response = await fetch(authUrl, strategy.options);
+                if (response.ok) {
+                    const result = await response.json();
+                    if (result.token) {
+                        token = result.token;
+                        authMode = 'jwt';
+                        log(`Autenticado via ${strategy.label}!`);
+                        break;
+                    }
+                }
+            } catch (e) {
+                log(`Estratégia ${strategy.label} falhou:`, e.message);
+            }
+        }
+
+        // Fallback: API legada
+        if (!token) {
+            try {
+                const legacyUrl = `${apiUrl}/read/userpw/${encodeURIComponent(config.username)}?apikey=${encodeURIComponent(config.apikey)}`;
+                const response = await fetch(legacyUrl);
+                if (response.ok) {
+                    authMode = 'apikey';
+                    log('Autenticado via API legada!');
+                }
+            } catch (e) {
+                log('API legada falhou:', e.message);
+            }
+        }
+
+        if (!token && authMode !== 'apikey') {
+            return { success: false, credentials: [] };
+        }
+
+        // Salvar sessão
+        if (token) {
+            const payload = JSON.parse(atob(token.split('.')[1]));
+            await new Promise(resolve => chrome.storage.local.set({
+                session: { token, user: { username: payload.username || config.username } }
+            }, resolve));
+        }
+
+        // Buscar credenciais
+        log('Buscando credenciais...');
+        const items = [];
+
+        if (authMode === 'apikey') {
+            // API legada: buscar pastas e itens
+            try {
+                const foldersUrl = `${apiUrl}/read/userfolders/all?apikey=${encodeURIComponent(config.apikey)}`;
+                const foldersRes = await fetch(foldersUrl);
+                if (foldersRes.ok) {
+                    const folders = await foldersRes.json();
+                    const ids = Array.isArray(folders) ? folders.map(f => f.id).filter(Boolean) : Object.keys(folders).filter(k => !isNaN(k));
+                    if (ids.length > 0) {
+                        const itemsRes = await fetch(`${apiUrl}/read/folder/${ids.join(';')}?apikey=${encodeURIComponent(config.apikey)}`);
+                        if (itemsRes.ok) {
+                            const raw = await itemsRes.json();
+                            (Array.isArray(raw) ? raw : [raw]).forEach(item => {
+                                if (item && item.login && (item.pw || item.pwd)) {
+                                    items.push({ id: item.id, label: item.label || '', login: item.login, password: item.pw || item.pwd, url: item.url || '', folder: item.folder_label || '' });
+                                }
+                            });
+                        }
+                    }
+                }
+            } catch (e) { log('Erro busca legada:', e.message); }
+        }
+
+        if (token && items.length === 0) {
+            // API JWT: buscar por IDs
+            for (let id = 1; id <= 200; id++) {
+                try {
+                    const res = await fetch(`${apiUrl}/item/get?id=${id}`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (res.ok) {
+                        const result = await res.json();
+                        const item = Array.isArray(result) && result.length > 0 ? result[0] : (result && result.id ? result : null);
+                        if (item && item.login && (item.pwd || item.pw)) {
+                            items.push({ id: item.id, label: item.label || '', login: item.login, password: item.pwd || item.pw, url: item.url || '', folder: item.folder_label || '' });
+                        }
+                    }
+                } catch (e) {}
+            }
+        }
+
+        // Salvar credenciais no storage
+        if (items.length > 0) {
+            await new Promise(resolve => chrome.storage.local.set({ credentials: items }, resolve));
+        }
+
+        log(`${items.length} credenciais carregadas`);
+        return { success: true, credentials: items };
     }
 
     // Criar e mostrar popup flutuante de autofill
@@ -1442,173 +1568,365 @@
         if (autofillPopupShown) return;
         autofillPopupShown = true;
 
-        const credentials = await getMatchingCredentials();
-        // Guardar credenciais em memória (não expor senhas no DOM)
+        let { matched, all, hasSession, hasConfig, config } = await getStoredCredentials();
         const credMap = {};
+
+        // Se tem config mas sem credenciais, tentar autenticar e buscar automaticamente
+        if (all.length === 0 && hasConfig && config) {
+            showLoadingPopup('Conectando ao TeamPass...');
+            const result = await authenticateAndFetch(config);
+            if (result.success && result.credentials.length > 0) {
+                // Recalcular matches com as credenciais carregadas
+                const updated = await getStoredCredentials();
+                matched = updated.matched;
+                all = updated.all;
+            }
+            removeLoadingPopup();
+        }
 
         // Remover popup anterior
         const existing = document.getElementById('cofre-autofill-popup');
         if (existing) existing.remove();
 
-        // Criar popup
         const popup = document.createElement('div');
         popup.id = 'cofre-autofill-popup';
 
         let content = '';
-        if (credentials.length > 0) {
-            const items = credentials.slice(0, 5).map((cred, idx) => {
+        const headerHtml = `
+            <div class="cofre-popup-header">
+                <span class="cofre-popup-icon">&#128274;</span>
+                <span>Cofre de Senhas FGF</span>
+                <span class="cofre-popup-close" id="cofre-popup-close">&times;</span>
+            </div>`;
+
+        if (matched.length > 0) {
+            // Credenciais correspondentes ao site
+            const items = matched.slice(0, 5).map((cred, idx) => {
                 const credId = `cofre-cred-${idx}`;
                 credMap[credId] = { login: cred.login, password: cred.password };
                 return `
                     <div class="cofre-cred-item" data-cred-id="${credId}">
                         <div class="cofre-cred-label">${escapeHtmlForPopup(cred.label || cred.login)}</div>
                         <div class="cofre-cred-user">${escapeHtmlForPopup(cred.login)}</div>
-                    </div>
-                `;
+                    </div>`;
             }).join('');
-            content = `
-                <div class="cofre-popup-header">
-                    <span class="cofre-popup-icon">&#128274;</span>
-                    <span>Cofre de Senhas FGF</span>
-                    <span class="cofre-popup-close" id="cofre-popup-close">&times;</span>
-                </div>
+            content = `${headerHtml}
                 <div class="cofre-popup-body">
-                    <div class="cofre-popup-hint">Credenciais encontradas para este site:</div>
+                    <div class="cofre-popup-hint">Credenciais para este site:</div>
                     ${items}
-                </div>
-            `;
-        } else {
-            content = `
-                <div class="cofre-popup-header">
-                    <span class="cofre-popup-icon">&#128274;</span>
-                    <span>Cofre de Senhas FGF</span>
-                    <span class="cofre-popup-close" id="cofre-popup-close">&times;</span>
-                </div>
+                    <div class="cofre-popup-divider"></div>
+                    <div class="cofre-cred-item cofre-show-all" id="cofre-show-all">
+                        <div class="cofre-cred-label" style="text-align:center;color:#6b9fff;">Ver todas (${all.length})</div>
+                    </div>
+                </div>`;
+        } else if (all.length > 0) {
+            // Tem credenciais mas nenhuma corresponde - mostrar todas com busca
+            const items = all.slice(0, 8).map((cred, idx) => {
+                const credId = `cofre-cred-${idx}`;
+                credMap[credId] = { login: cred.login, password: cred.password };
+                return `
+                    <div class="cofre-cred-item" data-cred-id="${credId}">
+                        <div class="cofre-cred-label">${escapeHtmlForPopup(cred.label || cred.login)}</div>
+                        <div class="cofre-cred-user">${escapeHtmlForPopup(cred.login)}</div>
+                    </div>`;
+            }).join('');
+            content = `${headerHtml}
                 <div class="cofre-popup-body">
-                    <div class="cofre-popup-hint">Login detectado. Abra a extensao para selecionar credenciais.</div>
-                </div>
-            `;
+                    <div class="cofre-popup-hint">Selecione uma credencial para preencher:</div>
+                    <div class="cofre-popup-search">
+                        <input type="text" id="cofre-popup-search" placeholder="Buscar credencial..." />
+                    </div>
+                    <div id="cofre-cred-list">${items}</div>
+                </div>`;
+        } else if (hasConfig) {
+            // Tem config mas não conseguiu carregar credenciais
+            content = `${headerHtml}
+                <div class="cofre-popup-body">
+                    <div class="cofre-popup-hint">Nao foi possivel carregar credenciais do TeamPass.</div>
+                    <div class="cofre-popup-hint">Verifique usuario, senha e API key na extensao.</div>
+                    <div class="cofre-cred-item" id="cofre-retry-auth">
+                        <div class="cofre-cred-label" style="text-align:center;color:#f0ad4e;">Tentar novamente</div>
+                    </div>
+                </div>`;
+        } else {
+            // Sem config
+            content = `${headerHtml}
+                <div class="cofre-popup-body">
+                    <div class="cofre-popup-hint">Login detectado nesta pagina.</div>
+                    <div class="cofre-popup-hint">Configure a extensao para usar o autopreenchimento.</div>
+                </div>`;
         }
 
         popup.innerHTML = content;
-
-        // Estilos do popup
-        if (!document.getElementById('cofre-popup-styles')) {
-            const style = document.createElement('style');
-            style.id = 'cofre-popup-styles';
-            style.textContent = `
-                #cofre-autofill-popup {
-                    position: fixed;
-                    top: 16px;
-                    right: 16px;
-                    width: 320px;
-                    background: #1a1f36;
-                    border: 1px solid #2d3555;
-                    border-radius: 12px;
-                    box-shadow: 0 8px 32px rgba(0,0,0,0.45);
-                    z-index: 2147483647;
-                    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-                    color: #e0e6ed;
-                    overflow: hidden;
-                    animation: cofre-popup-in 0.35s ease-out;
-                }
-                @keyframes cofre-popup-in {
-                    from { transform: translateY(-20px) scale(0.95); opacity: 0; }
-                    to { transform: translateY(0) scale(1); opacity: 1; }
-                }
-                @keyframes cofre-popup-out {
-                    from { transform: translateY(0) scale(1); opacity: 1; }
-                    to { transform: translateY(-20px) scale(0.95); opacity: 0; }
-                }
-                .cofre-popup-header {
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    padding: 12px 16px;
-                    background: #0d1025;
-                    font-weight: 600;
-                    font-size: 13px;
-                    border-bottom: 1px solid #2d3555;
-                }
-                .cofre-popup-icon {
-                    font-size: 18px;
-                }
-                .cofre-popup-close {
-                    margin-left: auto;
-                    cursor: pointer;
-                    font-size: 20px;
-                    opacity: 0.6;
-                    transition: opacity 0.2s;
-                    line-height: 1;
-                }
-                .cofre-popup-close:hover { opacity: 1; }
-                .cofre-popup-body {
-                    padding: 10px;
-                }
-                .cofre-popup-hint {
-                    font-size: 12px;
-                    color: #8892a8;
-                    padding: 4px 6px 8px;
-                }
-                .cofre-cred-item {
-                    padding: 10px 12px;
-                    border-radius: 8px;
-                    cursor: pointer;
-                    transition: background 0.15s;
-                    margin-bottom: 4px;
-                }
-                .cofre-cred-item:hover {
-                    background: #252b48;
-                }
-                .cofre-cred-label {
-                    font-size: 13px;
-                    font-weight: 600;
-                    color: #e0e6ed;
-                    margin-bottom: 2px;
-                }
-                .cofre-cred-user {
-                    font-size: 12px;
-                    color: #6b7a99;
-                }
-            `;
-            document.head.appendChild(style);
-        }
-
+        injectPopupStyles();
         document.body.appendChild(popup);
 
         // Evento: fechar popup
-        document.getElementById('cofre-popup-close').addEventListener('click', () => {
-            closeAutofillPopup();
-        });
+        const closeBtn = document.getElementById('cofre-popup-close');
+        if (closeBtn) closeBtn.addEventListener('click', closeAutofillPopup);
 
-        // Evento: clicar em uma credencial para preencher
-        popup.querySelectorAll('.cofre-cred-item').forEach(item => {
-            item.addEventListener('click', async () => {
-                const cred = credMap[item.dataset.credId];
+        // Evento: tentar novamente
+        const retryBtn = document.getElementById('cofre-retry-auth');
+        if (retryBtn) {
+            retryBtn.addEventListener('click', async () => {
+                autofillPopupShown = false;
+                closeAutofillPopup();
+                setTimeout(() => showAutofillPopup(usernameField, passwordField), 350);
+            });
+        }
+
+        // Evento: mostrar todas as credenciais
+        const showAllBtn = document.getElementById('cofre-show-all');
+        if (showAllBtn) {
+            showAllBtn.addEventListener('click', () => {
+                autofillPopupShown = false;
+                closeAutofillPopup();
+                setTimeout(() => showAllCredentialsPopup(usernameField, passwordField, all, credMap), 350);
+            });
+        }
+
+        // Evento: busca de credenciais
+        const searchInput = document.getElementById('cofre-popup-search');
+        if (searchInput) {
+            searchInput.addEventListener('input', (e) => {
+                const term = e.target.value.toLowerCase();
+                const listEl = document.getElementById('cofre-cred-list');
+                if (!listEl) return;
+
+                const filtered = all.filter(c =>
+                    (c.label || '').toLowerCase().includes(term) ||
+                    (c.login || '').toLowerCase().includes(term) ||
+                    (c.url || '').toLowerCase().includes(term)
+                ).slice(0, 8);
+
+                const newItems = filtered.map((cred, idx) => {
+                    const credId = `cofre-cred-s-${idx}`;
+                    credMap[credId] = { login: cred.login, password: cred.password };
+                    return `
+                        <div class="cofre-cred-item" data-cred-id="${credId}">
+                            <div class="cofre-cred-label">${escapeHtmlForPopup(cred.label || cred.login)}</div>
+                            <div class="cofre-cred-user">${escapeHtmlForPopup(cred.login)}</div>
+                        </div>`;
+                }).join('');
+
+                listEl.innerHTML = newItems || '<div class="cofre-popup-hint">Nenhuma credencial encontrada.</div>';
+                attachCredItemListeners(popup, credMap, usernameField, passwordField);
+            });
+            setTimeout(() => searchInput.focus(), 100);
+        }
+
+        attachCredItemListeners(popup, credMap, usernameField, passwordField);
+
+        // Auto-fechar depois de 30 segundos
+        setTimeout(closeAutofillPopup, 30000);
+    }
+
+    function showAllCredentialsPopup(usernameField, passwordField, allCreds, existingCredMap) {
+        autofillPopupShown = false;
+        // Simular que não há matched para forçar mostrar todas
+        const tempShowAll = async () => {
+            autofillPopupShown = true;
+            const credMap = { ...existingCredMap };
+
+            const existing = document.getElementById('cofre-autofill-popup');
+            if (existing) existing.remove();
+
+            const popup = document.createElement('div');
+            popup.id = 'cofre-autofill-popup';
+
+            const items = allCreds.slice(0, 15).map((cred, idx) => {
+                const credId = `cofre-cred-all-${idx}`;
+                credMap[credId] = { login: cred.login, password: cred.password };
+                return `
+                    <div class="cofre-cred-item" data-cred-id="${credId}">
+                        <div class="cofre-cred-label">${escapeHtmlForPopup(cred.label || cred.login)}</div>
+                        <div class="cofre-cred-user">${escapeHtmlForPopup(cred.login)}</div>
+                    </div>`;
+            }).join('');
+
+            popup.innerHTML = `
+                <div class="cofre-popup-header">
+                    <span class="cofre-popup-icon">&#128274;</span>
+                    <span>Cofre de Senhas FGF</span>
+                    <span class="cofre-popup-close" id="cofre-popup-close">&times;</span>
+                </div>
+                <div class="cofre-popup-body">
+                    <div class="cofre-popup-hint">Todas as credenciais:</div>
+                    <div class="cofre-popup-search">
+                        <input type="text" id="cofre-popup-search" placeholder="Buscar credencial..." />
+                    </div>
+                    <div id="cofre-cred-list">${items}</div>
+                </div>`;
+
+            document.body.appendChild(popup);
+
+            document.getElementById('cofre-popup-close').addEventListener('click', closeAutofillPopup);
+
+            const searchInput = document.getElementById('cofre-popup-search');
+            if (searchInput) {
+                searchInput.addEventListener('input', (e) => {
+                    const term = e.target.value.toLowerCase();
+                    const listEl = document.getElementById('cofre-cred-list');
+                    if (!listEl) return;
+                    const filtered = allCreds.filter(c =>
+                        (c.label || '').toLowerCase().includes(term) ||
+                        (c.login || '').toLowerCase().includes(term) ||
+                        (c.url || '').toLowerCase().includes(term)
+                    ).slice(0, 15);
+
+                    const newItems = filtered.map((cred, idx) => {
+                        const credId = `cofre-cred-f-${idx}`;
+                        credMap[credId] = { login: cred.login, password: cred.password };
+                        return `
+                            <div class="cofre-cred-item" data-cred-id="${credId}">
+                                <div class="cofre-cred-label">${escapeHtmlForPopup(cred.label || cred.login)}</div>
+                                <div class="cofre-cred-user">${escapeHtmlForPopup(cred.login)}</div>
+                            </div>`;
+                    }).join('');
+
+                    listEl.innerHTML = newItems || '<div class="cofre-popup-hint">Nenhuma credencial encontrada.</div>';
+                    attachCredItemListeners(popup, credMap, usernameField, passwordField);
+                });
+                setTimeout(() => searchInput.focus(), 100);
+            }
+
+            attachCredItemListeners(popup, credMap, usernameField, passwordField);
+            setTimeout(closeAutofillPopup, 30000);
+        };
+
+        tempShowAll();
+    }
+
+    function attachCredItemListeners(popup, credMap, usernameField, passwordField) {
+        popup.querySelectorAll('.cofre-cred-item[data-cred-id]').forEach(item => {
+            // Remover listener anterior (evitar duplicatas)
+            const newItem = item.cloneNode(true);
+            item.parentNode.replaceChild(newItem, item);
+
+            newItem.addEventListener('click', async () => {
+                const cred = credMap[newItem.dataset.credId];
                 if (!cred) return;
-                const login = cred.login;
-                const password = cred.password;
 
-                log('Preenchendo com:', login);
-
+                log('Preenchendo com:', cred.login);
                 const frameworks = FrameworkDetector.detect();
 
                 if (usernameField) {
-                    await FieldFiller.fillField(usernameField, login, frameworks);
+                    await FieldFiller.fillField(usernameField, cred.login, frameworks);
                 }
                 if (passwordField) {
-                    await FieldFiller.fillField(passwordField, password, frameworks);
+                    await FieldFiller.fillField(passwordField, cred.password, frameworks);
                 }
 
                 showFeedback('Credenciais preenchidas!', 'success');
                 closeAutofillPopup();
             });
         });
+    }
 
-        // Auto-fechar depois de 15 segundos
-        setTimeout(() => {
-            closeAutofillPopup();
-        }, 15000);
+    function showLoadingPopup(message) {
+        const existing = document.getElementById('cofre-autofill-popup');
+        if (existing) existing.remove();
+
+        const popup = document.createElement('div');
+        popup.id = 'cofre-autofill-popup';
+        popup.innerHTML = `
+            <div class="cofre-popup-header">
+                <span class="cofre-popup-icon">&#128274;</span>
+                <span>Cofre de Senhas FGF</span>
+            </div>
+            <div class="cofre-popup-body">
+                <div class="cofre-popup-hint" style="text-align:center;padding:16px 6px;">
+                    <div style="margin-bottom:8px;font-size:20px;">&#9203;</div>
+                    ${message}
+                </div>
+            </div>`;
+
+        // Garantir estilos
+        if (!document.getElementById('cofre-popup-styles')) {
+            injectPopupStyles();
+        }
+        document.body.appendChild(popup);
+    }
+
+    function removeLoadingPopup() {
+        const popup = document.getElementById('cofre-autofill-popup');
+        if (popup) popup.remove();
+    }
+
+    function injectPopupStyles() {
+        if (document.getElementById('cofre-popup-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'cofre-popup-styles';
+        style.textContent = `
+            #cofre-autofill-popup {
+                position: fixed;
+                top: 16px;
+                right: 16px;
+                width: 320px;
+                background: #1a1f36;
+                border: 1px solid #2d3555;
+                border-radius: 12px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+                z-index: 2147483647;
+                font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+                color: #e0e6ed;
+                overflow: hidden;
+                animation: cofre-popup-in 0.35s ease-out;
+            }
+            @keyframes cofre-popup-in {
+                from { transform: translateY(-20px) scale(0.95); opacity: 0; }
+                to { transform: translateY(0) scale(1); opacity: 1; }
+            }
+            @keyframes cofre-popup-out {
+                from { transform: translateY(0) scale(1); opacity: 1; }
+                to { transform: translateY(-20px) scale(0.95); opacity: 0; }
+            }
+            .cofre-popup-header {
+                display: flex; align-items: center; gap: 8px;
+                padding: 12px 16px; background: #0d1025;
+                font-weight: 600; font-size: 13px;
+                border-bottom: 1px solid #2d3555;
+            }
+            .cofre-popup-icon { font-size: 18px; }
+            .cofre-popup-close {
+                margin-left: auto; cursor: pointer;
+                font-size: 20px; opacity: 0.6;
+                transition: opacity 0.2s; line-height: 1;
+            }
+            .cofre-popup-close:hover { opacity: 1; }
+            .cofre-popup-body { padding: 10px; }
+            .cofre-popup-hint {
+                font-size: 12px; color: #8892a8; padding: 4px 6px 8px;
+            }
+            .cofre-cred-item {
+                padding: 10px 12px; border-radius: 8px;
+                cursor: pointer; transition: background 0.15s;
+                margin-bottom: 4px;
+            }
+            .cofre-cred-item:hover { background: #252b48; }
+            .cofre-cred-label {
+                font-size: 13px; font-weight: 600;
+                color: #e0e6ed; margin-bottom: 2px;
+            }
+            .cofre-cred-user { font-size: 12px; color: #6b7a99; }
+            .cofre-popup-divider {
+                border-top: 1px solid #2d3555; margin: 6px 0;
+            }
+            .cofre-popup-search input {
+                width: 100%; padding: 8px 10px;
+                border: 1px solid #2d3555; border-radius: 6px;
+                background: #0d1025; color: #e0e6ed;
+                font-size: 12px; outline: none;
+                box-sizing: border-box; margin-bottom: 6px;
+            }
+            .cofre-popup-search input:focus { border-color: #6b9fff; }
+            #cofre-cred-list { max-height: 250px; overflow-y: auto; }
+            #cofre-cred-list::-webkit-scrollbar { width: 4px; }
+            #cofre-cred-list::-webkit-scrollbar-thumb {
+                background: #2d3555; border-radius: 4px;
+            }
+        `;
+        document.head.appendChild(style);
     }
 
     function escapeHtmlForPopup(text) {
