@@ -126,81 +126,26 @@
         }
 
         /**
-         * Verifica se um elemento está visível COM ANÁLISE PROFUNDA
+         * Verifica se um elemento está visível
          */
         isVisible(element) {
             if (!element) return false;
-            if (!element.offsetParent) {
-                // Verificar se é position: fixed ou absolute que pode estar visível
-                const style = window.getComputedStyle(element);
-                if (style.position === 'fixed' || style.position === 'absolute') {
-                    // Verificar rect
-                    const rect = element.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        // Está potencialmente visível
-                    } else {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
+
+            // Verificar display none em toda a cadeia de parents
+            let el = element;
+            while (el && el !== document.body) {
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none') return false;
+                if (style.visibility === 'hidden') return false;
+                if (parseFloat(style.opacity) === 0) return false;
+                el = el.parentElement;
             }
 
             const rect = element.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) return false;
+            // Aceitar campos com dimensões mínimas (alguns sites usam campos muito pequenos)
+            if (rect.width < 1 && rect.height < 1) return false;
 
-            const style = window.getComputedStyle(element);
-            if (style.display === 'none') return false;
-            if (style.visibility === 'hidden') return false;
-            if (parseFloat(style.opacity) === 0) return false;
-
-            // Verificar z-index negativo ou muito baixo
-            const zIndex = parseInt(style.zIndex);
-            if (!isNaN(zIndex) && zIndex < -1000) return false;
-
-            // Verificar se está dentro da viewport OU tem parent scrollável
-            const isInViewport = rect.top < window.innerHeight && rect.bottom > 0 &&
-                                rect.left < window.innerWidth && rect.right > 0;
-            const hasScrollParent = this.hasScrollableParent(element);
-
-            // Verificar se não está coberto por outro elemento
-            const isNotCovered = this.isNotCoveredByOtherElement(element, rect);
-
-            return (isInViewport || hasScrollParent) && isNotCovered;
-        }
-
-        /**
-         * Verifica se o elemento não está coberto por outro
-         */
-        isNotCoveredByOtherElement(element, rect) {
-            try {
-                const centerX = rect.left + rect.width / 2;
-                const centerY = rect.top + rect.height / 2;
-                const topElement = document.elementFromPoint(centerX, centerY);
-                
-                if (!topElement) return true;
-                
-                // Verificar se o elemento no topo é o próprio ou um filho
-                return topElement === element || element.contains(topElement) || topElement.contains(element);
-            } catch (e) {
-                return true; // Se falhar, assumir que está visível
-            }
-        }
-
-        /**
-         * Verifica se o elemento tem um parent com scroll
-         */
-        hasScrollableParent(element) {
-            let parent = element.parentElement;
-            while (parent && parent !== document.body) {
-                const style = window.getComputedStyle(parent);
-                if (style.overflow === 'auto' || style.overflow === 'scroll' ||
-                    style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                    return true;
-                }
-                parent = parent.parentElement;
-            }
-            return false;
+            return true;
         }
 
         /**
@@ -1442,118 +1387,306 @@
     });
 
     // ════════════════════════════════════════════════════════════════════════════
-    // DETECÇÃO AUTOMÁTICA DE FORMULÁRIOS
+    // DETECÇÃO AUTOMÁTICA E POPUP DE AUTOFILL
     // ════════════════════════════════════════════════════════════════════════════
 
     let formDetected = false;
+    let autofillPopupShown = false;
+
+    // Buscar credenciais que correspondem à URL atual
+    async function getMatchingCredentials() {
+        return new Promise((resolve) => {
+            chrome.storage.local.get(['credentials', 'session'], (data) => {
+                if (!data.session || !data.credentials || data.credentials.length === 0) {
+                    resolve([]);
+                    return;
+                }
+
+                const currentUrl = window.location.href;
+                let domain = '';
+                try {
+                    domain = new URL(currentUrl).hostname.replace('www.', '');
+                } catch (e) {
+                    domain = currentUrl;
+                }
+
+                // Calcular match e filtrar
+                const matched = data.credentials.map(cred => {
+                    const credUrl = (cred.url || '').toLowerCase();
+                    const credLabel = (cred.label || '').toLowerCase();
+                    const domainLower = domain.toLowerCase();
+
+                    let score = 0;
+                    if (credUrl && credUrl.includes(domainLower)) score += 100;
+                    if (credUrl && domainLower.includes(credUrl.replace(/https?:\/\//, '').split('/')[0])) score += 80;
+                    if (credLabel.includes(domainLower.split('.')[0])) score += 50;
+
+                    // Fuzzy: partes do domínio no label ou URL
+                    const domainParts = domainLower.split('.').filter(p => p.length > 2);
+                    domainParts.forEach(part => {
+                        if (credLabel.includes(part)) score += 30;
+                        if (credUrl.includes(part)) score += 30;
+                    });
+
+                    return { ...cred, matchScore: score };
+                }).filter(c => c.matchScore > 0)
+                  .sort((a, b) => b.matchScore - a.matchScore);
+
+                resolve(matched);
+            });
+        });
+    }
+
+    // Criar e mostrar popup flutuante de autofill
+    async function showAutofillPopup(usernameField, passwordField) {
+        if (autofillPopupShown) return;
+        autofillPopupShown = true;
+
+        const credentials = await getMatchingCredentials();
+        // Guardar credenciais em memória (não expor senhas no DOM)
+        const credMap = {};
+
+        // Remover popup anterior
+        const existing = document.getElementById('cofre-autofill-popup');
+        if (existing) existing.remove();
+
+        // Criar popup
+        const popup = document.createElement('div');
+        popup.id = 'cofre-autofill-popup';
+
+        let content = '';
+        if (credentials.length > 0) {
+            const items = credentials.slice(0, 5).map((cred, idx) => {
+                const credId = `cofre-cred-${idx}`;
+                credMap[credId] = { login: cred.login, password: cred.password };
+                return `
+                    <div class="cofre-cred-item" data-cred-id="${credId}">
+                        <div class="cofre-cred-label">${escapeHtmlForPopup(cred.label || cred.login)}</div>
+                        <div class="cofre-cred-user">${escapeHtmlForPopup(cred.login)}</div>
+                    </div>
+                `;
+            }).join('');
+            content = `
+                <div class="cofre-popup-header">
+                    <span class="cofre-popup-icon">&#128274;</span>
+                    <span>Cofre de Senhas FGF</span>
+                    <span class="cofre-popup-close" id="cofre-popup-close">&times;</span>
+                </div>
+                <div class="cofre-popup-body">
+                    <div class="cofre-popup-hint">Credenciais encontradas para este site:</div>
+                    ${items}
+                </div>
+            `;
+        } else {
+            content = `
+                <div class="cofre-popup-header">
+                    <span class="cofre-popup-icon">&#128274;</span>
+                    <span>Cofre de Senhas FGF</span>
+                    <span class="cofre-popup-close" id="cofre-popup-close">&times;</span>
+                </div>
+                <div class="cofre-popup-body">
+                    <div class="cofre-popup-hint">Login detectado. Abra a extensao para selecionar credenciais.</div>
+                </div>
+            `;
+        }
+
+        popup.innerHTML = content;
+
+        // Estilos do popup
+        if (!document.getElementById('cofre-popup-styles')) {
+            const style = document.createElement('style');
+            style.id = 'cofre-popup-styles';
+            style.textContent = `
+                #cofre-autofill-popup {
+                    position: fixed;
+                    top: 16px;
+                    right: 16px;
+                    width: 320px;
+                    background: #1a1f36;
+                    border: 1px solid #2d3555;
+                    border-radius: 12px;
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+                    z-index: 2147483647;
+                    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+                    color: #e0e6ed;
+                    overflow: hidden;
+                    animation: cofre-popup-in 0.35s ease-out;
+                }
+                @keyframes cofre-popup-in {
+                    from { transform: translateY(-20px) scale(0.95); opacity: 0; }
+                    to { transform: translateY(0) scale(1); opacity: 1; }
+                }
+                @keyframes cofre-popup-out {
+                    from { transform: translateY(0) scale(1); opacity: 1; }
+                    to { transform: translateY(-20px) scale(0.95); opacity: 0; }
+                }
+                .cofre-popup-header {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 12px 16px;
+                    background: #0d1025;
+                    font-weight: 600;
+                    font-size: 13px;
+                    border-bottom: 1px solid #2d3555;
+                }
+                .cofre-popup-icon {
+                    font-size: 18px;
+                }
+                .cofre-popup-close {
+                    margin-left: auto;
+                    cursor: pointer;
+                    font-size: 20px;
+                    opacity: 0.6;
+                    transition: opacity 0.2s;
+                    line-height: 1;
+                }
+                .cofre-popup-close:hover { opacity: 1; }
+                .cofre-popup-body {
+                    padding: 10px;
+                }
+                .cofre-popup-hint {
+                    font-size: 12px;
+                    color: #8892a8;
+                    padding: 4px 6px 8px;
+                }
+                .cofre-cred-item {
+                    padding: 10px 12px;
+                    border-radius: 8px;
+                    cursor: pointer;
+                    transition: background 0.15s;
+                    margin-bottom: 4px;
+                }
+                .cofre-cred-item:hover {
+                    background: #252b48;
+                }
+                .cofre-cred-label {
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: #e0e6ed;
+                    margin-bottom: 2px;
+                }
+                .cofre-cred-user {
+                    font-size: 12px;
+                    color: #6b7a99;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        document.body.appendChild(popup);
+
+        // Evento: fechar popup
+        document.getElementById('cofre-popup-close').addEventListener('click', () => {
+            closeAutofillPopup();
+        });
+
+        // Evento: clicar em uma credencial para preencher
+        popup.querySelectorAll('.cofre-cred-item').forEach(item => {
+            item.addEventListener('click', async () => {
+                const cred = credMap[item.dataset.credId];
+                if (!cred) return;
+                const login = cred.login;
+                const password = cred.password;
+
+                log('Preenchendo com:', login);
+
+                const frameworks = FrameworkDetector.detect();
+
+                if (usernameField) {
+                    await FieldFiller.fillField(usernameField, login, frameworks);
+                }
+                if (passwordField) {
+                    await FieldFiller.fillField(passwordField, password, frameworks);
+                }
+
+                showFeedback('Credenciais preenchidas!', 'success');
+                closeAutofillPopup();
+            });
+        });
+
+        // Auto-fechar depois de 15 segundos
+        setTimeout(() => {
+            closeAutofillPopup();
+        }, 15000);
+    }
+
+    function escapeHtmlForPopup(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function closeAutofillPopup() {
+        const popup = document.getElementById('cofre-autofill-popup');
+        if (popup) {
+            popup.style.animation = 'cofre-popup-out 0.3s ease-in forwards';
+            setTimeout(() => popup.remove(), 300);
+        }
+    }
 
     function detectLoginForm() {
+        if (formDetected) return;
+
         const detector = new FieldDetector();
         const usernameField = detector.findUsernameField();
         const passwordField = detector.findPasswordField();
 
-        if (usernameField && passwordField && !formDetected) {
-            log('✓ Formulário de login detectado!');
+        if (usernameField || passwordField) {
+            log('Formulario de login detectado!', {
+                username: usernameField ? { name: usernameField.name, id: usernameField.id, type: usernameField.type } : null,
+                password: passwordField ? { name: passwordField.name, id: passwordField.id } : null
+            });
             formDetected = true;
 
-            // Adicionar indicador visual nos campos (opcional)
-            if (DEBUG) {
-                addPasswordManagerIcon(usernameField);
-                addPasswordManagerIcon(passwordField);
-            }
+            // Mostrar popup de autofill
+            showAutofillPopup(usernameField, passwordField);
 
-            // Notificar background script (para badge/notificação)
+            // Notificar background script
             try {
                 chrome.runtime.sendMessage({
                     action: 'form_detected',
                     url: window.location.href
                 });
             } catch (e) {
-                // Ignorar se background script não responder
+                // Ignorar
             }
         }
     }
 
-    function addPasswordManagerIcon(field) {
-        // Prevenir duplicação
-        if (field.dataset.teampassIcon) return;
-        field.dataset.teampassIcon = 'true';
-
-        // Wrapper para posicionamento relativo
-        const wrapper = document.createElement('div');
-        wrapper.style.cssText = 'position: relative; display: inline-block; width: 100%;';
-
-        // Inserir wrapper
-        field.parentNode.insertBefore(wrapper, field);
-        wrapper.appendChild(field);
-
-        // Criar ícone
-        const icon = document.createElement('div');
-        icon.innerHTML = '🔑';
-        icon.title = 'Cofre de Senhas FGF - Clique na extensão para preencher';
-        icon.style.cssText = `
-            position: absolute;
-            right: 10px;
-            top: 50%;
-            transform: translateY(-50%);
-            cursor: pointer;
-            font-size: 18px;
-            opacity: 0.5;
-            transition: opacity 0.2s, transform 0.2s;
-            z-index: 10000;
-            pointer-events: auto;
-        `;
-
-        icon.addEventListener('mouseenter', () => {
-            icon.style.opacity = '1';
-            icon.style.transform = 'translateY(-50%) scale(1.2)';
-        });
-
-        icon.addEventListener('mouseleave', () => {
-            icon.style.opacity = '0.5';
-            icon.style.transform = 'translateY(-50%) scale(1)';
-        });
-
-        icon.addEventListener('click', (e) => {
-            e.stopPropagation();
-            showFeedback('📌 Clique no ícone da extensão para selecionar credenciais', 'info');
-        });
-
-        wrapper.appendChild(icon);
-    }
-
     // Detectar formulários quando a página carregar
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', detectLoginForm);
+        document.addEventListener('DOMContentLoaded', () => setTimeout(detectLoginForm, 300));
     } else {
-        detectLoginForm();
+        setTimeout(detectLoginForm, 300);
     }
 
-    // Re-detectar após delay (para SPAs que carregam dinamicamente)
-    setTimeout(detectLoginForm, 1000);
-    setTimeout(detectLoginForm, 3000);
+    // Re-detectar após delays (para SPAs)
+    setTimeout(detectLoginForm, 1500);
+    setTimeout(detectLoginForm, 4000);
 
     // Detectar formulários carregados dinamicamente via MutationObserver
+    let mutationTimer = null;
     const observer = new MutationObserver((mutations) => {
-        // Debounce: apenas detectar se houve mudança significativa
         let shouldDetect = false;
 
-        mutations.forEach(mutation => {
-            mutation.addedNodes.forEach(node => {
-                if (node.nodeType === 1) { // Element node
-                    if (node.tagName === 'FORM' || 
+        for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+                if (node.nodeType === 1) {
+                    if (node.tagName === 'FORM' ||
                         node.tagName === 'INPUT' ||
-                        node.querySelector('form') ||
-                        node.querySelector('input')) {
+                        (node.querySelector && (node.querySelector('form') || node.querySelector('input')))) {
                         shouldDetect = true;
+                        break;
                     }
                 }
-            });
-        });
+            }
+            if (shouldDetect) break;
+        }
 
-        if (shouldDetect) {
-            formDetected = false; // Reset para re-detectar
-            setTimeout(detectLoginForm, 500);
+        if (shouldDetect && !formDetected) {
+            clearTimeout(mutationTimer);
+            mutationTimer = setTimeout(detectLoginForm, 500);
         }
     });
 
@@ -1562,6 +1695,6 @@
         subtree: true
     });
 
-    log('✓ Sistema de detecção automática ativo');
+    log('Sistema de deteccao automatica ativo');
 
 })();
