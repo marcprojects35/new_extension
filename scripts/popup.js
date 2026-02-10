@@ -7,46 +7,136 @@ class TeamPassAPI {
         this.baseUrl = baseUrl.replace(/\/$/, '');
         this.apiUrl = `${this.baseUrl}/api/index.php`;
         this.token = null;
+        this.apikey = null;
+        this.authMode = null; // 'jwt' ou 'apikey'
     }
 
+    // Tenta autenticar com múltiplos formatos (bug conhecido do TeamPass #3893)
     async authenticate(username, password, apikey) {
+        this.apikey = apikey;
+        const authUrl = `${this.apiUrl}/authorize`;
+
+        console.log('[TeamPass] Autenticando em:', authUrl);
+
+        // Estratégia 1: POST com form-urlencoded (contorna bug do Content-Type JSON)
+        const attempt1 = await this._tryAuth(authUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ login: username, password, apikey })
+        }, 'form-urlencoded', username);
+        if (attempt1.success) return attempt1;
+
+        // Estratégia 2: POST com JSON (formato padrão documentado)
+        const attempt2 = await this._tryAuth(authUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ login: username, password, apikey })
+        }, 'json', username);
+        if (attempt2.success) return attempt2;
+
+        // Estratégia 3: POST JSON sem Content-Type explícito
+        const attempt3 = await this._tryAuth(authUrl, {
+            method: 'POST',
+            body: JSON.stringify({ login: username, password, apikey })
+        }, 'json-sem-header', username);
+        if (attempt3.success) return attempt3;
+
+        // Estratégia 4: Testar API legada (sem JWT, só apikey na URL)
+        console.log('[TeamPass] Tentando API legada (apikey na URL)...');
         try {
-            const response = await fetch(`${this.apiUrl}/authorize`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ login: username, password, apikey })
-            });
+            const legacyUrl = `${this.apiUrl}/read/userpw/${encodeURIComponent(username)}?apikey=${encodeURIComponent(apikey)}`;
+            const legacyResponse = await fetch(legacyUrl);
+            console.log('[TeamPass] API legada status:', legacyResponse.status);
+
+            if (legacyResponse.ok) {
+                const data = await legacyResponse.json();
+                console.log('[TeamPass] API legada funcionou! Itens:', Array.isArray(data) ? data.length : 'N/A');
+                this.authMode = 'apikey';
+                this.token = null;
+                return {
+                    success: true,
+                    user: { username },
+                    mode: 'apikey'
+                };
+            }
+        } catch (e) {
+            console.log('[TeamPass] API legada falhou:', e.message);
+        }
+
+        // Todas as tentativas falharam - retornar o erro mais informativo
+        const lastError = attempt2.error || attempt1.error || 'Todas as tentativas falharam';
+        return { success: false, error: lastError };
+    }
+
+    async _tryAuth(url, options, label, username) {
+        try {
+            console.log(`[TeamPass] Tentativa ${label}...`);
+            const response = await fetch(url, options);
+            const responseText = await response.text();
+            console.log(`[TeamPass] ${label} - Status: ${response.status}, Resposta: ${responseText.substring(0, 200)}`);
 
             if (response.ok) {
-                const result = await response.json();
+                let result;
+                try {
+                    result = JSON.parse(responseText);
+                } catch (e) {
+                    return { success: false, error: `Resposta inválida (${label})` };
+                }
+
                 if (result.token) {
                     this.token = result.token;
-                    // Decodificar token JWT para pegar info do usuário
+                    this.authMode = 'jwt';
                     const payload = JSON.parse(atob(result.token.split('.')[1]));
+                    console.log(`[TeamPass] Autenticado via ${label}!`);
                     return {
                         success: true,
-                        user: {
-                            username: payload.username || username
-                        }
+                        user: { username: payload.username || username },
+                        mode: 'jwt'
                     };
                 }
-                return { success: false, error: result.error || 'Erro na autenticação' };
+                return { success: false, error: result.error || 'Token ausente na resposta' };
             }
-            return { success: false, error: `Erro ${response.status}` };
+
+            // Extrair mensagem de erro
+            let errorMsg = `Erro ${response.status}`;
+            try {
+                const errorResult = JSON.parse(responseText);
+                if (errorResult.error) errorMsg += ` - ${errorResult.error}`;
+                else if (errorResult.message) errorMsg += ` - ${errorResult.message}`;
+            } catch (e) {
+                if (responseText) errorMsg += ` - ${responseText.substring(0, 100)}`;
+            }
+            return { success: false, error: errorMsg };
         } catch (error) {
-            return { success: false, error: error.message };
+            console.error(`[TeamPass] Erro ${label}:`, error);
+            return { success: false, error: `Erro de conexão (${label}): ${error.message}` };
         }
     }
 
     async getItemById(itemId) {
-        if (!this.token) return null;
         try {
-            const response = await fetch(`${this.apiUrl}/item/get?id=${itemId}`, {
-                headers: { 'Authorization': `Bearer ${this.token}` }
-            });
+            let response;
+            if (this.authMode === 'apikey') {
+                // API legada: apikey como query parameter
+                response = await fetch(`${this.apiUrl}/read/items/${itemId}?apikey=${encodeURIComponent(this.apikey)}`);
+            } else if (this.token) {
+                // API JWT: token no header
+                response = await fetch(`${this.apiUrl}/item/get?id=${itemId}`, {
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+            } else {
+                return null;
+            }
+
             if (response.ok) {
                 const result = await response.json();
-                return Array.isArray(result) && result.length > 0 ? result[0] : null;
+                if (Array.isArray(result) && result.length > 0) {
+                    return result[0];
+                }
+                // API legada pode retornar objeto direto
+                if (result && result.id) {
+                    return result;
+                }
             }
         } catch (error) {
             console.error('Erro ao buscar item:', error);
@@ -55,24 +145,84 @@ class TeamPassAPI {
     }
 
     async getAllItems(progressCallback) {
+        // Se modo apikey, tentar buscar via endpoint de usuário primeiro
+        if (this.authMode === 'apikey') {
+            return this._getAllItemsLegacy(progressCallback);
+        }
+        return this._getAllItemsJWT(progressCallback);
+    }
+
+    async _getAllItemsLegacy(progressCallback) {
         const items = [];
-        const maxId = 200; // Mesmo valor do Python
-        
+
+        // Tentar buscar pastas do usuário e itens de cada pasta
+        try {
+            const foldersUrl = `${this.apiUrl}/read/userfolders/all?apikey=${encodeURIComponent(this.apikey)}`;
+            const foldersResponse = await fetch(foldersUrl);
+
+            if (foldersResponse.ok) {
+                const folders = await foldersResponse.json();
+                const folderIds = Array.isArray(folders)
+                    ? folders.map(f => f.id).filter(Boolean)
+                    : Object.keys(folders).filter(k => !isNaN(k));
+
+                if (folderIds.length > 0) {
+                    const folderIdStr = folderIds.join(';');
+                    const itemsUrl = `${this.apiUrl}/read/folder/${folderIdStr}?apikey=${encodeURIComponent(this.apikey)}`;
+                    const itemsResponse = await fetch(itemsUrl);
+
+                    if (itemsResponse.ok) {
+                        const rawItems = await itemsResponse.json();
+                        const itemList = Array.isArray(rawItems) ? rawItems : [rawItems];
+
+                        for (const item of itemList) {
+                            if (item && item.login && (item.pw || item.pwd)) {
+                                items.push({
+                                    id: item.id,
+                                    label: item.label || '',
+                                    description: item.description || '',
+                                    login: item.login,
+                                    password: item.pw || item.pwd,
+                                    url: item.url || '',
+                                    folder: item.folder_label || item.folder || ''
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('[TeamPass] Erro ao buscar via API legada:', error);
+        }
+
+        // Se não conseguiu via pastas, tentar por IDs sequenciais
+        if (items.length === 0) {
+            return this._getAllItemsJWT(progressCallback);
+        }
+
+        if (progressCallback) progressCallback(items.length, items.length);
+        return items;
+    }
+
+    async _getAllItemsJWT(progressCallback) {
+        const items = [];
+        const maxId = 200;
+
         for (let id = 1; id <= maxId; id++) {
             try {
                 const item = await this.getItemById(id);
-                if (item && item.login && item.pwd) {
+                if (item && item.login && (item.pwd || item.pw)) {
                     items.push({
                         id: item.id,
                         label: item.label || '',
                         description: item.description || '',
                         login: item.login,
-                        password: item.pwd,
+                        password: item.pwd || item.pw,
                         url: item.url || '',
                         folder: item.folder_label || ''
                     });
                 }
-                
+
                 if (progressCallback && id % 10 === 0) {
                     progressCallback(id, maxId);
                 }
@@ -80,7 +230,7 @@ class TeamPassAPI {
                 console.error(`Erro ao buscar item ${id}:`, error);
             }
         }
-        
+
         return items;
     }
 }
@@ -93,7 +243,6 @@ function fuzzyMatch(str1, str2) {
     const s1 = str1.toLowerCase();
     const s2 = str2.toLowerCase();
     
-    let matches = 0;
     let maxMatches = 0;
     
     for (let i = 0; i < s1.length; i++) {
@@ -261,24 +410,49 @@ class PopupUI {
 
     async testConnection() {
         const url = document.getElementById('server-url').value.trim();
+        const username = document.getElementById('config-username').value.trim();
+        const password = document.getElementById('config-password').value.trim();
+        const apikey = document.getElementById('config-apikey').value.trim();
+
         if (!url) {
             this.showStatus('config', 'Digite a URL do servidor', 'error');
             return;
         }
 
         this.showStatus('config', 'Testando conexão...', 'info');
-        
+
         try {
             const testApi = new TeamPassAPI(url);
-            const response = await fetch(`${testApi.apiUrl}/authorize`, { method: 'GET' });
-            
-            if ([200, 400, 401, 405, 422].includes(response.status)) {
-                this.showStatus('config', '✓ Conexão OK!', 'success');
+
+            // Verificar se o servidor é alcançável
+            let pingOk = false;
+            try {
+                const pingResponse = await fetch(`${testApi.apiUrl}/authorize`, { method: 'GET' });
+                pingOk = [200, 400, 401, 405, 422].includes(pingResponse.status);
+                if (!pingOk) {
+                    this.showStatus('config', `Servidor retornou erro ${pingResponse.status}`, 'error');
+                    return;
+                }
+            } catch (e) {
+                this.showStatus('config', 'Servidor inacessível: ' + e.message, 'error');
+                return;
+            }
+
+            // Se tem credenciais preenchidas, testar autenticação completa
+            if (username && password && apikey) {
+                this.showStatus('config', 'Servidor OK. Testando autenticação...', 'info');
+                const result = await testApi.authenticate(username, password, apikey);
+                if (result.success) {
+                    const mode = result.mode === 'apikey' ? ' (API legada)' : ' (JWT)';
+                    this.showStatus('config', `Conexão e autenticação OK!${mode}`, 'success');
+                } else {
+                    this.showStatus('config', `Servidor OK, autenticação falhou: ${result.error}`, 'error');
+                }
             } else {
-                this.showStatus('config', `Erro ${response.status}`, 'error');
+                this.showStatus('config', 'Servidor acessível! Preencha as credenciais para testar.', 'success');
             }
         } catch (error) {
-            this.showStatus('config', error.message, 'error');
+            this.showStatus('config', 'Erro: ' + error.message, 'error');
         }
     }
 

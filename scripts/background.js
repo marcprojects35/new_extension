@@ -44,15 +44,31 @@ setInterval(async () => {
                 if (config && config.username && config.password && config.apikey) {
                     try {
                         const apiUrl = config.api_url.replace(/\/$/, '') + '/api/index.php';
-                        const response = await fetch(`${apiUrl}/authorize`, {
+                        const authUrl = `${apiUrl}/authorize`;
+
+                        // Tentar form-urlencoded primeiro (contorna bug TeamPass #3893)
+                        let response = await fetch(authUrl, {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                            body: new URLSearchParams({
                                 login: config.username,
                                 password: config.password,
                                 apikey: config.apikey
                             })
                         });
+
+                        // Fallback para JSON se form-urlencoded não funcionar
+                        if (!response.ok) {
+                            response = await fetch(authUrl, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    login: config.username,
+                                    password: config.password,
+                                    apikey: config.apikey
+                                })
+                            });
+                        }
 
                         if (response.ok) {
                             const result = await response.json();
