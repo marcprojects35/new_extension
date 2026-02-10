@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Cofre de Senhas FGF",
-  "description": "Sistema de Precisão Máxima - Autopreenchimento 100% confiável com retry inteligente v3.0",
+  "description": "Extensão de autopreenchimento desenvolvida pelo grupo de T.I Grupo FGF",
   "version": "3.0.0",
   "permissions": [
     "storage",

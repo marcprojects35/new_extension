@@ -1392,15 +1392,38 @@
 
     let formDetected = false;
     let autofillPopupShown = false;
+    let pendingPasswordCred = null; // Credencial aguardando campo de senha (login multi-step)
+    let lastDetectedPasswordField = null; // Referência ao último campo de senha detectado
 
     // Buscar credenciais do storage
+    // Deduplicar credenciais: manter apenas a mais recente por login+dominio
+    function deduplicateCredentials(creds) {
+        const seen = new Map();
+        // Iterar do fim pro inicio para manter a mais recente (ultimo adicionado)
+        for (let i = creds.length - 1; i >= 0; i--) {
+            const cred = creds[i];
+            let domain = '';
+            try {
+                domain = new URL(cred.url || '').hostname.replace('www.', '').toLowerCase();
+            } catch (e) {
+                domain = (cred.url || '').replace(/https?:\/\//, '').split('/')[0].replace('www.', '').toLowerCase();
+            }
+            const key = `${(cred.login || '').toLowerCase()}|${domain}`;
+            if (!seen.has(key)) {
+                seen.set(key, cred);
+            }
+        }
+        // Retornar na ordem original (inverter de volta)
+        return Array.from(seen.values()).reverse();
+    }
+
     async function getStoredCredentials() {
         return new Promise((resolve) => {
             chrome.storage.local.get(['credentials', 'session', 'config'], (data) => {
                 const hasSession = !!(data.session && data.session.token);
                 const hasConfig = !!(data.config && data.config.api_url && data.config.username);
                 const config = data.config || null;
-                const allCreds = data.credentials || [];
+                const allCreds = deduplicateCredentials(data.credentials || []);
 
                 const currentUrl = window.location.href;
                 let domain = '';
@@ -1554,9 +1577,10 @@
             }
         }
 
-        // Salvar credenciais no storage
+        // Salvar credenciais no storage (deduplicadas)
         if (items.length > 0) {
-            await new Promise(resolve => chrome.storage.local.set({ credentials: items }, resolve));
+            const dedupedItems = deduplicateCredentials(items);
+            await new Promise(resolve => chrome.storage.local.set({ credentials: dedupedItems }, resolve));
         }
 
         log(`${items.length} credenciais carregadas`);
@@ -1815,9 +1839,17 @@
                 }
                 if (passwordField) {
                     await FieldFiller.fillField(passwordField, cred.password, frameworks);
+                    showFeedback('Credenciais preenchidas!', 'success');
+                    setDomainCooldown();
+                } else {
+                    // Login multi-step: campo de senha ainda não existe
+                    // Salvar credencial e aguardar o campo aparecer
+                    pendingPasswordCred = cred;
+                    log('Campo de senha não encontrado - aguardando campo aparecer (login multi-step)');
+                    showFeedback('Login preenchido! Aguardando campo de senha...', 'success');
+                    startPasswordFieldWatcher();
                 }
 
-                showFeedback('Credenciais preenchidas!', 'success');
                 closeAutofillPopup();
             });
         });
@@ -1943,32 +1975,195 @@
         }
     }
 
-    function detectLoginForm() {
+    // Observador para login multi-step: aguarda campo de senha aparecer
+    function startPasswordFieldWatcher() {
+        if (!pendingPasswordCred) return;
+        log('Iniciando observador de campo de senha (login multi-step)');
+
+        let passwordWatcherTimer = null;
+        const passwordObserver = new MutationObserver(() => {
+            clearTimeout(passwordWatcherTimer);
+            passwordWatcherTimer = setTimeout(async () => {
+                if (!pendingPasswordCred) {
+                    passwordObserver.disconnect();
+                    return;
+                }
+
+                const detector = new FieldDetector();
+                const pwField = detector.findPasswordField();
+
+                if (pwField) {
+                    log('Campo de senha detectado no multi-step! Preenchendo automaticamente.');
+                    lastDetectedPasswordField = pwField;
+                    const cred = pendingPasswordCred;
+                    pendingPasswordCred = null;
+                    passwordObserver.disconnect();
+
+                    const frameworks = FrameworkDetector.detect();
+                    await FieldFiller.fillField(pwField, cred.password, frameworks);
+                    showFeedback('Senha preenchida automaticamente!', 'success');
+                    setDomainCooldown();
+                }
+            }, 400);
+        });
+
+        passwordObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['type', 'style', 'class', 'hidden', 'disabled']
+        });
+
+        // Verificar imediatamente (o campo pode já ter aparecido)
+        setTimeout(async () => {
+            if (!pendingPasswordCred) return;
+            const detector = new FieldDetector();
+            const pwField = detector.findPasswordField();
+            if (pwField) {
+                log('Campo de senha já visível no multi-step!');
+                lastDetectedPasswordField = pwField;
+                const cred = pendingPasswordCred;
+                pendingPasswordCred = null;
+                passwordObserver.disconnect();
+
+                const frameworks = FrameworkDetector.detect();
+                await FieldFiller.fillField(pwField, cred.password, frameworks);
+                showFeedback('Senha preenchida automaticamente!', 'success');
+                setDomainCooldown();
+            }
+        }, 500);
+
+        // Timeout de segurança: parar de observar após 30 segundos
+        setTimeout(() => {
+            if (pendingPasswordCred) {
+                log('Timeout aguardando campo de senha multi-step');
+                // Mostrar popup para o usuário preencher manualmente
+                autofillPopupShown = false;
+                const detector = new FieldDetector();
+                const pwField = detector.findPasswordField();
+                if (pwField) {
+                    showAutofillPopup(null, pwField);
+                }
+                pendingPasswordCred = null;
+            }
+            passwordObserver.disconnect();
+        }, 30000);
+    }
+
+    // Verificar se a página é realmente uma página de login
+    function isLikelyLoginPage() {
+        const url = window.location.href.toLowerCase();
+        const path = window.location.pathname.toLowerCase();
+        const title = document.title.toLowerCase();
+
+        // URLs que indicam login
+        const loginPatterns = /\b(login|signin|sign-in|sign_in|logon|log-on|auth|authenticate|sso|cas|saml|oauth|acesso|entrar|acessar)\b/i;
+
+        // URLs que indicam que o usuário JÁ está logado (não mostrar popup)
+        const loggedInPatterns = /\b(dashboard|painel|home|feed|inbox|mail|portal|admin|settings|config|profile|account|console|app)\b/i;
+
+        // Se a URL tem padrão de "logado", não é login
+        if (loggedInPatterns.test(path) && !loginPatterns.test(path)) {
+            return false;
+        }
+
+        // Se a URL ou título tem padrão de login, é login
+        if (loginPatterns.test(url) || loginPatterns.test(title)) {
+            return true;
+        }
+
+        // Verificar se existe um formulário com botão de "entrar/login"
+        const buttons = document.querySelectorAll('button, input[type="submit"], a[role="button"]');
+        for (const btn of buttons) {
+            const text = (btn.textContent || btn.value || '').toLowerCase().trim();
+            if (/^(login|sign\s?in|entrar|acessar|log\s?on|conectar|submit|iniciar\s?sess)/.test(text)) {
+                return true;
+            }
+        }
+
+        return null; // Indeterminado - deixar a detecção de campos decidir
+    }
+
+    // Verificar cooldown de domínio (não mostrar popup se preencheu recentemente)
+    async function isDomainOnCooldown() {
+        return new Promise((resolve) => {
+            const domain = window.location.hostname;
+            chrome.storage.local.get('autofill_cooldowns', (data) => {
+                const cooldowns = data.autofill_cooldowns || {};
+                const lastFill = cooldowns[domain];
+                if (lastFill && (Date.now() - lastFill) < 600000) { // 10 minutos
+                    resolve(true);
+                } else {
+                    resolve(false);
+                }
+            });
+        });
+    }
+
+    // Salvar cooldown após preenchimento bem-sucedido
+    function setDomainCooldown() {
+        const domain = window.location.hostname;
+        chrome.storage.local.get('autofill_cooldowns', (data) => {
+            const cooldowns = data.autofill_cooldowns || {};
+            cooldowns[domain] = Date.now();
+            // Limpar cooldowns antigos (> 1 hora)
+            for (const key in cooldowns) {
+                if (Date.now() - cooldowns[key] > 3600000) delete cooldowns[key];
+            }
+            chrome.storage.local.set({ autofill_cooldowns: cooldowns });
+        });
+    }
+
+    async function detectLoginForm() {
         if (formDetected) return;
+
+        // Verificar cooldown
+        if (await isDomainOnCooldown()) {
+            log('Domínio em cooldown - popup não será exibido');
+            return;
+        }
 
         const detector = new FieldDetector();
         const usernameField = detector.findUsernameField();
         const passwordField = detector.findPasswordField();
 
-        if (usernameField || passwordField) {
-            log('Formulario de login detectado!', {
-                username: usernameField ? { name: usernameField.name, id: usernameField.id, type: usernameField.type } : null,
-                password: passwordField ? { name: passwordField.name, id: passwordField.id } : null
+        // Requer pelo menos um campo de senha OU (campo de username + página parece login)
+        const pageIsLogin = isLikelyLoginPage();
+
+        if (passwordField) {
+            // Tem campo de senha → é login
+        } else if (usernameField && pageIsLogin === true) {
+            // Só username, mas a página parece login (multi-step)
+        } else if (usernameField && pageIsLogin === null) {
+            // Indeterminado: verificar se o campo username é forte o suficiente
+            // (tem label "login", "email", etc. e não parece um formulário de busca)
+            const form = usernameField.closest('form');
+            if (!form) return; // Sem formulário = provavelmente não é login
+            const formInputs = form.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"])');
+            if (formInputs.length > 4) return; // Formulários com muitos campos não são login
+        } else {
+            return; // Nenhum campo encontrado ou página não é login
+        }
+
+        log('Formulario de login detectado!', {
+            username: usernameField ? { name: usernameField.name, id: usernameField.id, type: usernameField.type } : null,
+            password: passwordField ? { name: passwordField.name, id: passwordField.id } : null,
+            pageIsLogin
+        });
+        formDetected = true;
+        lastDetectedPasswordField = passwordField;
+
+        // Mostrar popup de autofill
+        showAutofillPopup(usernameField, passwordField);
+
+        // Notificar background script
+        try {
+            chrome.runtime.sendMessage({
+                action: 'form_detected',
+                url: window.location.href
             });
-            formDetected = true;
-
-            // Mostrar popup de autofill
-            showAutofillPopup(usernameField, passwordField);
-
-            // Notificar background script
-            try {
-                chrome.runtime.sendMessage({
-                    action: 'form_detected',
-                    url: window.location.href
-                });
-            } catch (e) {
-                // Ignorar
-            }
+        } catch (e) {
+            // Ignorar
         }
     }
 
@@ -1986,7 +2181,7 @@
     // Detectar formulários carregados dinamicamente via MutationObserver
     let mutationTimer = null;
     const observer = new MutationObserver((mutations) => {
-        let shouldDetect = false;
+        let hasNewInputs = false;
 
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
@@ -1994,15 +2189,15 @@
                     if (node.tagName === 'FORM' ||
                         node.tagName === 'INPUT' ||
                         (node.querySelector && (node.querySelector('form') || node.querySelector('input')))) {
-                        shouldDetect = true;
+                        hasNewInputs = true;
                         break;
                     }
                 }
             }
-            if (shouldDetect) break;
+            if (hasNewInputs) break;
         }
 
-        if (shouldDetect && !formDetected) {
+        if (hasNewInputs && !formDetected) {
             clearTimeout(mutationTimer);
             mutationTimer = setTimeout(detectLoginForm, 500);
         }
@@ -2014,5 +2209,439 @@
     });
 
     log('Sistema de deteccao automatica ativo');
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // CAPTURA DE CREDENCIAIS E OFERTA PARA SALVAR SENHA
+    // ════════════════════════════════════════════════════════════════════════════
+
+    let capturedCredentials = { username: '', password: '' };
+    let formSubmitWatcherActive = false;
+    let savePasswordPopupShown = false;
+
+    // Verificar se o dominio esta na blacklist de "Nunca salvar"
+    async function isDomainSaveBlacklisted() {
+        return new Promise((resolve) => {
+            const domain = window.location.hostname;
+            chrome.storage.local.get('save_password_blacklist', (data) => {
+                const blacklist = data.save_password_blacklist || [];
+                resolve(blacklist.includes(domain));
+            });
+        });
+    }
+
+    // Adicionar dominio a blacklist
+    function addDomainToSaveBlacklist() {
+        const domain = window.location.hostname;
+        chrome.storage.local.get('save_password_blacklist', (data) => {
+            const blacklist = data.save_password_blacklist || [];
+            if (!blacklist.includes(domain)) {
+                blacklist.push(domain);
+                chrome.storage.local.set({ save_password_blacklist: blacklist });
+            }
+        });
+    }
+
+    // Configurar monitoramento de submit do formulario
+    function setupFormSubmitWatcher(usernameField, passwordField) {
+        if (formSubmitWatcherActive) return;
+        if (!passwordField) return; // Precisa ter campo de senha para capturar
+        formSubmitWatcherActive = true;
+
+        log('Configurando monitoramento de submit para salvar senha');
+
+        // Monitorar valores dos campos em tempo real
+        if (usernameField) {
+            capturedCredentials.username = usernameField.value;
+            usernameField.addEventListener('input', () => {
+                capturedCredentials.username = usernameField.value;
+            });
+            usernameField.addEventListener('change', () => {
+                capturedCredentials.username = usernameField.value;
+            });
+        }
+
+        if (passwordField) {
+            capturedCredentials.password = passwordField.value;
+            passwordField.addEventListener('input', () => {
+                capturedCredentials.password = passwordField.value;
+            });
+            passwordField.addEventListener('change', () => {
+                capturedCredentials.password = passwordField.value;
+            });
+        }
+
+        // Handler para quando o formulario e submetido
+        async function onFormSubmit() {
+            // Capturar valores atuais (podem ter sido setados via JS)
+            if (usernameField) capturedCredentials.username = usernameField.value;
+            if (passwordField) capturedCredentials.password = passwordField.value;
+
+            const username = capturedCredentials.username.trim();
+            const password = capturedCredentials.password.trim();
+
+            log('Submit detectado. Credenciais capturadas:', { username, hasPassword: !!password });
+
+            if (!username || !password) return;
+
+            // Verificar blacklist
+            const blacklisted = await isDomainSaveBlacklisted();
+            if (blacklisted) {
+                log('Dominio na blacklist - nao oferecendo salvar');
+                return;
+            }
+
+            // Verificar se ja existe credencial para este dominio
+            const { matched } = await getStoredCredentials();
+            if (matched.length > 0) {
+                log('Ja existem credenciais para este dominio - nao oferecendo salvar');
+                return;
+            }
+
+            // Aguardar um pouco para o login processar
+            setTimeout(() => {
+                showSavePasswordPopup(username, password);
+            }, 1500);
+        }
+
+        // Interceptar submit do formulario
+        const form = passwordField.closest('form') || (usernameField ? usernameField.closest('form') : null);
+        if (form) {
+            form.addEventListener('submit', (e) => {
+                log('Evento submit do formulario capturado');
+                onFormSubmit();
+            });
+        }
+
+        // Interceptar clique em botoes de submit
+        const formContainer = form || document.body;
+        const submitButtons = formContainer.querySelectorAll(
+            'button[type="submit"], input[type="submit"], button:not([type]), a[role="button"]'
+        );
+        submitButtons.forEach(btn => {
+            const text = (btn.textContent || btn.value || '').toLowerCase().trim();
+            if (/^(login|sign\s?in|entrar|acessar|log\s?on|conectar|submit|iniciar|enviar|continuar|next|continue)/.test(text) ||
+                btn.type === 'submit') {
+                btn.addEventListener('click', () => {
+                    log('Clique em botao de submit detectado:', text || btn.type);
+                    // Pequeno delay para capturar valores atualizados
+                    setTimeout(onFormSubmit, 100);
+                });
+            }
+        });
+
+        // Interceptar Enter no campo de senha
+        if (passwordField) {
+            passwordField.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    log('Enter pressionado no campo de senha');
+                    setTimeout(onFormSubmit, 100);
+                }
+            });
+        }
+    }
+
+    // Buscar pastas do TeamPass via background
+    async function fetchFolders() {
+        return new Promise((resolve) => {
+            chrome.runtime.sendMessage({ action: 'get_folders' }, (response) => {
+                if (response && response.success && response.folders) {
+                    resolve(response.folders);
+                } else {
+                    resolve([]);
+                }
+            });
+        });
+    }
+
+    // Mostrar popup "Salvar senha?"
+    async function showSavePasswordPopup(username, password) {
+        if (savePasswordPopupShown) return;
+        savePasswordPopupShown = true;
+
+        log('Mostrando popup "Salvar senha?" para:', username);
+
+        // Remover popup de autofill se existir
+        closeAutofillPopup();
+
+        const existing = document.getElementById('cofre-save-popup');
+        if (existing) existing.remove();
+
+        const domain = window.location.hostname;
+        const popup = document.createElement('div');
+        popup.id = 'cofre-save-popup';
+
+        // Buscar pastas disponiveis
+        const folders = await fetchFolders();
+        log('Pastas disponiveis:', folders.length);
+
+        let folderSelectHtml = '';
+        if (folders.length > 0) {
+            const optionsHtml = folders.map(f =>
+                `<option value="${escapeHtmlForPopup(String(f.id))}">${escapeHtmlForPopup(f.title)}</option>`
+            ).join('');
+            folderSelectHtml = `
+                <div class="cofre-save-folder-row">
+                    <span class="cofre-save-label">Pasta:</span>
+                    <select id="cofre-save-folder" class="cofre-save-select">
+                        <option value="0">-- Selecione uma pasta --</option>
+                        ${optionsHtml}
+                    </select>
+                </div>`;
+        } else {
+            folderSelectHtml = `
+                <div class="cofre-save-folder-row">
+                    <span class="cofre-save-label">Pasta:</span>
+                    <span class="cofre-save-value cofre-save-no-folders">Nenhuma pasta disponivel</span>
+                </div>`;
+        }
+
+        popup.innerHTML = `
+            <div class="cofre-popup-header">
+                <span class="cofre-popup-icon">&#128274;</span>
+                <span>Cofre de Senhas FGF</span>
+                <span class="cofre-popup-close" id="cofre-save-close">&times;</span>
+            </div>
+            <div class="cofre-popup-body">
+                <div class="cofre-save-title">Salvar senha para este site?</div>
+                <div class="cofre-save-domain">${escapeHtmlForPopup(domain)}</div>
+                <div class="cofre-save-cred-info">
+                    <div class="cofre-save-user-row">
+                        <span class="cofre-save-label">Usuario:</span>
+                        <span class="cofre-save-value">${escapeHtmlForPopup(username)}</span>
+                    </div>
+                    <div class="cofre-save-user-row">
+                        <span class="cofre-save-label">Senha:</span>
+                        <span class="cofre-save-value">${'*'.repeat(Math.min(password.length, 12))}</span>
+                    </div>
+                    ${folderSelectHtml}
+                </div>
+                <div class="cofre-save-actions">
+                    <button class="cofre-save-btn cofre-save-btn-primary" id="cofre-save-confirm">Salvar no Cofre</button>
+                    <button class="cofre-save-btn cofre-save-btn-secondary" id="cofre-save-dismiss">Agora nao</button>
+                </div>
+                <div class="cofre-save-never" id="cofre-save-never">Nunca para este site</div>
+            </div>
+        `;
+
+        injectPopupStyles();
+        injectSavePopupStyles();
+        document.body.appendChild(popup);
+
+        // Evento: fechar
+        document.getElementById('cofre-save-close').addEventListener('click', closeSavePopup);
+        document.getElementById('cofre-save-dismiss').addEventListener('click', closeSavePopup);
+
+        // Evento: salvar
+        document.getElementById('cofre-save-confirm').addEventListener('click', async () => {
+            const btn = document.getElementById('cofre-save-confirm');
+            const folderSelect = document.getElementById('cofre-save-folder');
+            const selectedFolderId = folderSelect ? folderSelect.value : '0';
+            const selectedFolderName = folderSelect ? folderSelect.options[folderSelect.selectedIndex].text : '';
+
+            btn.textContent = 'Salvando...';
+            btn.disabled = true;
+
+            try {
+                const response = await new Promise((resolve) => {
+                    chrome.runtime.sendMessage({
+                        action: 'save_credential',
+                        data: {
+                            label: domain,
+                            login: username,
+                            password: password,
+                            url: window.location.origin,
+                            folderId: selectedFolderId !== '0' ? parseInt(selectedFolderId) : 0,
+                            folderName: selectedFolderName !== '-- Selecione uma pasta --' ? selectedFolderName : ''
+                        }
+                    }, resolve);
+                });
+
+                if (response && response.success) {
+                    closeSavePopup();
+                    showFeedback('Senha salva no cofre com sucesso!', 'success');
+                } else {
+                    btn.textContent = 'Salvar no Cofre';
+                    btn.disabled = false;
+                    showFeedback('Erro ao salvar: ' + (response ? response.error : 'sem resposta'), 'error');
+                }
+            } catch (error) {
+                btn.textContent = 'Salvar no Cofre';
+                btn.disabled = false;
+                showFeedback('Erro ao salvar: ' + error.message, 'error');
+            }
+        });
+
+        // Evento: nunca para este site
+        document.getElementById('cofre-save-never').addEventListener('click', () => {
+            addDomainToSaveBlacklist();
+            closeSavePopup();
+            showFeedback('Este site foi adicionado a lista de excluidos', 'info');
+        });
+
+        // Auto-fechar apos 30 segundos
+        setTimeout(closeSavePopup, 30000);
+    }
+
+    function closeSavePopup() {
+        const popup = document.getElementById('cofre-save-popup');
+        if (popup) {
+            popup.style.animation = 'cofre-popup-out 0.3s ease-in forwards';
+            setTimeout(() => popup.remove(), 300);
+        }
+        savePasswordPopupShown = false;
+    }
+
+    function injectSavePopupStyles() {
+        if (document.getElementById('cofre-save-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'cofre-save-styles';
+        style.textContent = `
+            #cofre-save-popup {
+                position: fixed;
+                top: 16px;
+                right: 16px;
+                width: 340px;
+                background: #1a1f36;
+                border: 1px solid #2d3555;
+                border-radius: 12px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+                z-index: 2147483647;
+                font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+                color: #e0e6ed;
+                overflow: hidden;
+                animation: cofre-popup-in 0.35s ease-out;
+            }
+            .cofre-save-title {
+                font-size: 14px;
+                font-weight: 600;
+                color: #e0e6ed;
+                padding: 8px 6px 4px;
+            }
+            .cofre-save-domain {
+                font-size: 12px;
+                color: #6b9fff;
+                padding: 0 6px 10px;
+                font-weight: 500;
+            }
+            .cofre-save-cred-info {
+                background: #0d1025;
+                border-radius: 8px;
+                padding: 10px 12px;
+                margin: 0 4px 12px;
+            }
+            .cofre-save-user-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 3px 0;
+                font-size: 12px;
+            }
+            .cofre-save-label {
+                color: #8892a8;
+                min-width: 55px;
+            }
+            .cofre-save-value {
+                color: #e0e6ed;
+                font-weight: 500;
+                word-break: break-all;
+            }
+            .cofre-save-actions {
+                display: flex;
+                gap: 8px;
+                padding: 0 4px 8px;
+            }
+            .cofre-save-btn {
+                flex: 1;
+                padding: 9px 12px;
+                border: none;
+                border-radius: 7px;
+                font-size: 13px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: background 0.15s, opacity 0.15s;
+                font-family: inherit;
+            }
+            .cofre-save-btn:disabled {
+                opacity: 0.6;
+                cursor: not-allowed;
+            }
+            .cofre-save-btn-primary {
+                background: #4a9eff;
+                color: #fff;
+            }
+            .cofre-save-btn-primary:hover:not(:disabled) {
+                background: #3a8eef;
+            }
+            .cofre-save-btn-secondary {
+                background: #2d3555;
+                color: #8892a8;
+            }
+            .cofre-save-btn-secondary:hover {
+                background: #3a4166;
+            }
+            .cofre-save-never {
+                text-align: center;
+                font-size: 11px;
+                color: #e74c3c;
+                cursor: pointer;
+                padding: 4px 0 10px;
+                opacity: 0.7;
+                transition: opacity 0.15s;
+            }
+            .cofre-save-never:hover {
+                opacity: 1;
+            }
+            .cofre-save-folder-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 6px 0 3px;
+                font-size: 12px;
+            }
+            .cofre-save-select {
+                flex: 1;
+                padding: 6px 8px;
+                border: 1px solid #2d3555;
+                border-radius: 6px;
+                background: #1a1f36;
+                color: #e0e6ed;
+                font-size: 12px;
+                font-family: inherit;
+                outline: none;
+                cursor: pointer;
+                appearance: auto;
+            }
+            .cofre-save-select:focus {
+                border-color: #6b9fff;
+            }
+            .cofre-save-select option {
+                background: #1a1f36;
+                color: #e0e6ed;
+            }
+            .cofre-save-no-folders {
+                color: #8892a8;
+                font-style: italic;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // Integrar com detectLoginForm - adicionar watcher apos detectar formulario
+    const originalDetectLoginForm = detectLoginForm;
+    detectLoginForm = async function() {
+        await originalDetectLoginForm();
+
+        // Se formulario foi detectado, configurar watcher de submit
+        if (formDetected && !formSubmitWatcherActive) {
+            const detector = new FieldDetector();
+            const usernameField = detector.findUsernameField();
+            const passwordField = detector.findPasswordField();
+            if (passwordField) {
+                setupFormSubmitWatcher(usernameField, passwordField);
+            }
+        }
+    };
+
+    log('Sistema de captura de credenciais ativo');
 
 })();

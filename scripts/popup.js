@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════════════
-// COFRE DE SENHAS FGF - POPUP SCRIPT
+// COFRE DE SENHAS FGF - POPUP SCRIPT v3.1
 // ════════════════════════════════════════════════════════════════════════════
 
 class TeamPassAPI {
@@ -8,17 +8,15 @@ class TeamPassAPI {
         this.apiUrl = `${this.baseUrl}/api/index.php`;
         this.token = null;
         this.apikey = null;
-        this.authMode = null; // 'jwt' ou 'apikey'
+        this.authMode = null;
     }
 
-    // Tenta autenticar com múltiplos formatos (bug conhecido do TeamPass #3893)
     async authenticate(username, password, apikey) {
         this.apikey = apikey;
         const authUrl = `${this.apiUrl}/authorize`;
 
         console.log('[TeamPass] Autenticando em:', authUrl);
 
-        // Estratégia 1: POST com form-urlencoded (contorna bug do Content-Type JSON)
         const attempt1 = await this._tryAuth(authUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -26,7 +24,6 @@ class TeamPassAPI {
         }, 'form-urlencoded', username);
         if (attempt1.success) return attempt1;
 
-        // Estratégia 2: POST com JSON (formato padrão documentado)
         const attempt2 = await this._tryAuth(authUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -34,36 +31,25 @@ class TeamPassAPI {
         }, 'json', username);
         if (attempt2.success) return attempt2;
 
-        // Estratégia 3: POST JSON sem Content-Type explícito
         const attempt3 = await this._tryAuth(authUrl, {
             method: 'POST',
             body: JSON.stringify({ login: username, password, apikey })
         }, 'json-sem-header', username);
         if (attempt3.success) return attempt3;
 
-        // Estratégia 4: Testar API legada (sem JWT, só apikey na URL)
         console.log('[TeamPass] Tentando API legada (apikey na URL)...');
         try {
             const legacyUrl = `${this.apiUrl}/read/userpw/${encodeURIComponent(username)}?apikey=${encodeURIComponent(apikey)}`;
             const legacyResponse = await fetch(legacyUrl);
-            console.log('[TeamPass] API legada status:', legacyResponse.status);
-
             if (legacyResponse.ok) {
-                const data = await legacyResponse.json();
-                console.log('[TeamPass] API legada funcionou! Itens:', Array.isArray(data) ? data.length : 'N/A');
                 this.authMode = 'apikey';
                 this.token = null;
-                return {
-                    success: true,
-                    user: { username },
-                    mode: 'apikey'
-                };
+                return { success: true, user: { username }, mode: 'apikey' };
             }
         } catch (e) {
             console.log('[TeamPass] API legada falhou:', e.message);
         }
 
-        // Todas as tentativas falharam - retornar o erro mais informativo
         const lastError = attempt2.error || attempt1.error || 'Todas as tentativas falharam';
         return { success: false, error: lastError };
     }
@@ -73,31 +59,22 @@ class TeamPassAPI {
             console.log(`[TeamPass] Tentativa ${label}...`);
             const response = await fetch(url, options);
             const responseText = await response.text();
-            console.log(`[TeamPass] ${label} - Status: ${response.status}, Resposta: ${responseText.substring(0, 200)}`);
+            console.log(`[TeamPass] ${label} - Status: ${response.status}`);
 
             if (response.ok) {
                 let result;
-                try {
-                    result = JSON.parse(responseText);
-                } catch (e) {
+                try { result = JSON.parse(responseText); } catch (e) {
                     return { success: false, error: `Resposta inválida (${label})` };
                 }
-
                 if (result.token) {
                     this.token = result.token;
                     this.authMode = 'jwt';
                     const payload = JSON.parse(atob(result.token.split('.')[1]));
-                    console.log(`[TeamPass] Autenticado via ${label}!`);
-                    return {
-                        success: true,
-                        user: { username: payload.username || username },
-                        mode: 'jwt'
-                    };
+                    return { success: true, user: { username: payload.username || username }, mode: 'jwt' };
                 }
                 return { success: false, error: result.error || 'Token ausente na resposta' };
             }
 
-            // Extrair mensagem de erro
             let errorMsg = `Erro ${response.status}`;
             try {
                 const errorResult = JSON.parse(responseText);
@@ -108,7 +85,6 @@ class TeamPassAPI {
             }
             return { success: false, error: errorMsg };
         } catch (error) {
-            console.error(`[TeamPass] Erro ${label}:`, error);
             return { success: false, error: `Erro de conexão (${label}): ${error.message}` };
         }
     }
@@ -117,26 +93,17 @@ class TeamPassAPI {
         try {
             let response;
             if (this.authMode === 'apikey') {
-                // API legada: apikey como query parameter
                 response = await fetch(`${this.apiUrl}/read/items/${itemId}?apikey=${encodeURIComponent(this.apikey)}`);
             } else if (this.token) {
-                // API JWT: token no header
                 response = await fetch(`${this.apiUrl}/item/get?id=${itemId}`, {
                     headers: { 'Authorization': `Bearer ${this.token}` }
                 });
-            } else {
-                return null;
-            }
+            } else return null;
 
             if (response.ok) {
                 const result = await response.json();
-                if (Array.isArray(result) && result.length > 0) {
-                    return result[0];
-                }
-                // API legada pode retornar objeto direto
-                if (result && result.id) {
-                    return result;
-                }
+                if (Array.isArray(result) && result.length > 0) return result[0];
+                if (result && result.id) return result;
             }
         } catch (error) {
             console.error('Erro ao buscar item:', error);
@@ -145,61 +112,132 @@ class TeamPassAPI {
     }
 
     async getAllItems(progressCallback) {
-        // Se modo apikey, tentar buscar via endpoint de usuário primeiro
-        if (this.authMode === 'apikey') {
-            return this._getAllItemsLegacy(progressCallback);
-        }
+        if (this.authMode === 'apikey') return this._getAllItemsLegacy(progressCallback);
         return this._getAllItemsJWT(progressCallback);
+    }
+
+    async createItem({ label, login, password, url, folderId }) {
+        console.log('[TeamPass] Criando item:', { label, login, url, folderId });
+
+        if (this.authMode === 'apikey') {
+            return this._createItemLegacy({ label, login, password, url, folderId });
+        }
+        return this._createItemJWT({ label, login, password, url, folderId });
+    }
+
+    async _createItemJWT({ label, login, password, url, folderId }) {
+        if (!this.token) return { success: false, error: 'Token JWT ausente' };
+
+        const body = {
+            label: label || url,
+            login,
+            pwd: password,
+            url: url || '',
+            folder_id: folderId || 0
+        };
+
+        // Estrategia 1: POST /item com JSON
+        try {
+            const response = await fetch(`${this.apiUrl}/item`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(body)
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                console.log('[TeamPass] Item criado (JWT json):', result);
+                return { success: true, itemId: result.id || result.item_id || null };
+            }
+            console.log('[TeamPass] JWT json falhou:', response.status);
+        } catch (e) {
+            console.log('[TeamPass] Erro JWT json:', e.message);
+        }
+
+        // Estrategia 2: POST /item com form-urlencoded
+        try {
+            const response = await fetch(`${this.apiUrl}/item`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.token}`,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: new URLSearchParams(body)
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                console.log('[TeamPass] Item criado (JWT form):', result);
+                return { success: true, itemId: result.id || result.item_id || null };
+            }
+            console.log('[TeamPass] JWT form falhou:', response.status);
+        } catch (e) {
+            console.log('[TeamPass] Erro JWT form:', e.message);
+        }
+
+        return { success: false, error: 'Nao foi possivel criar item via JWT' };
+    }
+
+    async _createItemLegacy({ label, login, password, url, folderId }) {
+        // API legada: POST /add/item/{base64_encoded_data}?apikey=...
+        try {
+            const itemData = JSON.stringify({
+                label: label || url,
+                login,
+                pwd: password,
+                url: url || '',
+                folder_id: folderId || 0
+            });
+            const encoded = btoa(new TextEncoder().encode(itemData).reduce((s, b) => s + String.fromCharCode(b), ''));
+            const addUrl = `${this.apiUrl}/add/item/${encoded}?apikey=${encodeURIComponent(this.apikey)}`;
+
+            const response = await fetch(addUrl, { method: 'POST' });
+            if (response.ok) {
+                const result = await response.json();
+                console.log('[TeamPass] Item criado (legacy):', result);
+                return { success: true, itemId: result.id || result.item_id || null };
+            }
+            console.log('[TeamPass] Legacy falhou:', response.status);
+        } catch (e) {
+            console.log('[TeamPass] Erro legacy:', e.message);
+        }
+
+        return { success: false, error: 'Nao foi possivel criar item via API legada' };
     }
 
     async _getAllItemsLegacy(progressCallback) {
         const items = [];
-
-        // Tentar buscar pastas do usuário e itens de cada pasta
         try {
             const foldersUrl = `${this.apiUrl}/read/userfolders/all?apikey=${encodeURIComponent(this.apikey)}`;
             const foldersResponse = await fetch(foldersUrl);
-
             if (foldersResponse.ok) {
                 const folders = await foldersResponse.json();
                 const folderIds = Array.isArray(folders)
                     ? folders.map(f => f.id).filter(Boolean)
                     : Object.keys(folders).filter(k => !isNaN(k));
-
                 if (folderIds.length > 0) {
-                    const folderIdStr = folderIds.join(';');
-                    const itemsUrl = `${this.apiUrl}/read/folder/${folderIdStr}?apikey=${encodeURIComponent(this.apikey)}`;
-                    const itemsResponse = await fetch(itemsUrl);
-
+                    const itemsResponse = await fetch(`${this.apiUrl}/read/folder/${folderIds.join(';')}?apikey=${encodeURIComponent(this.apikey)}`);
                     if (itemsResponse.ok) {
                         const rawItems = await itemsResponse.json();
-                        const itemList = Array.isArray(rawItems) ? rawItems : [rawItems];
-
-                        for (const item of itemList) {
+                        (Array.isArray(rawItems) ? rawItems : [rawItems]).forEach(item => {
                             if (item && item.login && (item.pw || item.pwd)) {
                                 items.push({
-                                    id: item.id,
-                                    label: item.label || '',
-                                    description: item.description || '',
-                                    login: item.login,
-                                    password: item.pw || item.pwd,
-                                    url: item.url || '',
-                                    folder: item.folder_label || item.folder || ''
+                                    id: item.id, label: item.label || '', description: item.description || '',
+                                    login: item.login, password: item.pw || item.pwd,
+                                    url: item.url || '', folder: item.folder_label || item.folder || ''
                                 });
                             }
-                        }
+                        });
                     }
                 }
             }
         } catch (error) {
-            console.error('[TeamPass] Erro ao buscar via API legada:', error);
+            console.error('[TeamPass] Erro API legada:', error);
         }
-
-        // Se não conseguiu via pastas, tentar por IDs sequenciais
-        if (items.length === 0) {
-            return this._getAllItemsJWT(progressCallback);
-        }
-
+        if (items.length === 0) return this._getAllItemsJWT(progressCallback);
         if (progressCallback) progressCallback(items.length, items.length);
         return items;
     }
@@ -207,109 +245,75 @@ class TeamPassAPI {
     async _getAllItemsJWT(progressCallback) {
         const items = [];
         const maxId = 200;
-
         for (let id = 1; id <= maxId; id++) {
             try {
                 const item = await this.getItemById(id);
                 if (item && item.login && (item.pwd || item.pw)) {
                     items.push({
-                        id: item.id,
-                        label: item.label || '',
-                        description: item.description || '',
-                        login: item.login,
-                        password: item.pwd || item.pw,
-                        url: item.url || '',
-                        folder: item.folder_label || ''
+                        id: item.id, label: item.label || '', description: item.description || '',
+                        login: item.login, password: item.pwd || item.pw,
+                        url: item.url || '', folder: item.folder_label || ''
                     });
                 }
-
-                if (progressCallback && id % 10 === 0) {
-                    progressCallback(id, maxId);
-                }
-            } catch (error) {
-                console.error(`Erro ao buscar item ${id}:`, error);
-            }
+                if (progressCallback && id % 10 === 0) progressCallback(id, maxId);
+            } catch (error) {}
         }
-
         return items;
     }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// FUZZY MATCHING (mesma lógica do Python)
+// MATCHING
 // ════════════════════════════════════════════════════════════════════════════
 
-function fuzzyMatch(str1, str2) {
-    const s1 = str1.toLowerCase();
-    const s2 = str2.toLowerCase();
-    
-    let maxMatches = 0;
-    
-    for (let i = 0; i < s1.length; i++) {
-        for (let j = 0; j < s2.length; j++) {
-            let k = 0;
-            while (s1[i + k] && s2[j + k] && s1[i + k] === s2[j + k]) {
-                k++;
-            }
-            if (k > maxMatches) {
-                maxMatches = k;
-            }
+function deduplicateCredentials(creds) {
+    const seen = new Map();
+    for (let i = creds.length - 1; i >= 0; i--) {
+        const cred = creds[i];
+        let domain = '';
+        try {
+            domain = new URL(cred.url || '').hostname.replace('www.', '').toLowerCase();
+        } catch (e) {
+            domain = (cred.url || '').replace(/https?:\/\//, '').split('/')[0].replace('www.', '').toLowerCase();
+        }
+        const key = `${(cred.login || '').toLowerCase()}|${domain}`;
+        if (!seen.has(key)) {
+            seen.set(key, cred);
         }
     }
-    
-    const ratio = (2.0 * maxMatches) / (s1.length + s2.length);
-    return ratio;
+    return Array.from(seen.values()).reverse();
 }
 
 function matchCredential(credential, currentUrl) {
     if (!currentUrl) return 0;
-    
-    const credUrl = credential.url || '';
-    const credLabel = credential.label || '';
-    const credDesc = credential.description || '';
-    
-    // Extrair domínio da URL atual
+    const credUrl = (credential.url || '').toLowerCase();
+    const credLabel = (credential.label || '').toLowerCase();
     let domain = '';
-    try {
-        const url = new URL(currentUrl);
-        domain = url.hostname.replace('www.', '');
-    } catch (e) {
-        domain = currentUrl;
-    }
-    
-    // Calcular scores
-    const urlScore = fuzzyMatch(credUrl, currentUrl);
-    const domainScore = fuzzyMatch(credUrl, domain);
-    const labelScore = fuzzyMatch(credLabel, domain);
-    const descScore = fuzzyMatch(credDesc, domain);
-    
-    // Retornar o maior score
-    return Math.max(urlScore, domainScore, labelScore * 0.8, descScore * 0.6);
+    try { domain = new URL(currentUrl).hostname.replace('www.', '').toLowerCase(); } catch (e) { domain = currentUrl.toLowerCase(); }
+
+    let score = 0;
+    if (credUrl && credUrl.includes(domain)) score = Math.max(score, 100);
+    const credDomain = credUrl.replace(/https?:\/\//, '').split('/')[0];
+    if (credDomain && domain.includes(credDomain)) score = Math.max(score, 80);
+    const domainBase = domain.split('.')[0];
+    if (domainBase.length > 2 && credLabel.includes(domainBase)) score = Math.max(score, 50);
+    if (domainBase.length > 2 && credUrl.includes(domainBase)) score = Math.max(score, 40);
+    return score;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// GERENCIAMENTO DE ESTADO
+// STATE
 // ════════════════════════════════════════════════════════════════════════════
 
 class AppState {
     static async load() {
-        return new Promise((resolve) => {
-            chrome.storage.local.get(['config', 'session', 'credentials'], (data) => {
-                resolve(data);
-            });
-        });
+        return new Promise(resolve => chrome.storage.local.get(['config', 'session', 'credentials'], resolve));
     }
-
     static async save(key, value) {
-        return new Promise((resolve) => {
-            chrome.storage.local.set({ [key]: value }, resolve);
-        });
+        return new Promise(resolve => chrome.storage.local.set({ [key]: value }, resolve));
     }
-
     static async clear(key) {
-        return new Promise((resolve) => {
-            chrome.storage.local.remove(key, resolve);
-        });
+        return new Promise(resolve => chrome.storage.local.remove(key, resolve));
     }
 }
 
@@ -319,7 +323,6 @@ class AppState {
 
 class PopupUI {
     constructor() {
-        this.currentScreen = null;
         this.api = null;
         this.credentials = [];
         this.currentUrl = '';
@@ -327,12 +330,9 @@ class PopupUI {
     }
 
     async init() {
-        // Carregar estado
         const state = await AppState.load();
 
-        // Verificar se tem configuração completa
         if (!state.config || !state.config.api_url || !state.config.username || !state.config.password || !state.config.apikey) {
-            // Preencher campos com valores salvos parcialmente
             if (state.config) {
                 if (state.config.api_url) document.getElementById('server-url').value = state.config.api_url;
                 if (state.config.username) document.getElementById('config-username').value = state.config.username;
@@ -344,27 +344,22 @@ class PopupUI {
             return;
         }
 
-        // Preencher campos da config com valores salvos
         document.getElementById('server-url').value = state.config.api_url;
         document.getElementById('config-username').value = state.config.username;
         document.getElementById('config-password').value = state.config.password;
         document.getElementById('config-apikey').value = state.config.apikey;
 
-        // Verificar se tem sessão ativa
         if (state.session && state.session.token) {
             this.api = new TeamPassAPI(state.config.api_url);
             this.api.token = state.session.token;
-
-            // Carregar credenciais do cache ou buscar novas
             if (state.credentials && state.credentials.length > 0) {
-                this.credentials = state.credentials;
+                this.credentials = deduplicateCredentials(state.credentials);
                 this.showMainScreen(state.session.user);
             } else {
                 this.showMainScreen(state.session.user);
                 await this.refreshCredentials();
             }
         } else {
-            // Tentar auto-login com credenciais salvas
             this.api = new TeamPassAPI(state.config.api_url);
             this.showScreen('config');
             this.showStatus('config', 'Conectando automaticamente...', 'info');
@@ -375,21 +370,39 @@ class PopupUI {
     }
 
     setupEventListeners() {
-        // Config screen
         document.getElementById('test-connection')?.addEventListener('click', () => this.testConnection());
         document.getElementById('save-config')?.addEventListener('click', () => this.saveConfig());
-
-        // Main screen
         document.getElementById('logout-btn')?.addEventListener('click', () => this.logout());
         document.getElementById('refresh-btn')?.addEventListener('click', () => this.refreshCredentials());
-        document.getElementById('search-box')?.addEventListener('input', (e) => this.filterCredentials(e.target.value));
+        document.getElementById('settings-btn')?.addEventListener('click', () => {
+            this.showScreen('config');
+            this.renderBlacklist();
+        });
+        document.getElementById('search-box')?.addEventListener('input', (e) => this.renderAllTab(e.target.value));
 
-        // Enter key nos inputs da config
         ['config-username', 'config-password', 'config-apikey'].forEach(id => {
             document.getElementById(id)?.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') this.saveConfig();
             });
         });
+
+        // Tab navigation
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => this.switchTab(tab.dataset.tab));
+        });
+
+        // Blacklist: limpar todos
+        document.getElementById('blacklist-clear-all')?.addEventListener('click', () => this.clearBlacklist());
+
+        // Carregar blacklist na tela de config
+        this.renderBlacklist();
+    }
+
+    switchTab(tabName) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        document.querySelector(`.tab[data-tab="${tabName}"]`)?.classList.add('active');
+        document.getElementById(`tab-${tabName}`)?.classList.add('active');
     }
 
     showScreen(screenName) {
@@ -397,7 +410,6 @@ class PopupUI {
             document.getElementById(id).style.display = 'none';
         });
         document.getElementById(`${screenName}-screen`).style.display = 'flex';
-        this.currentScreen = screenName;
     }
 
     showStatus(screenName, message, type = 'info') {
@@ -414,31 +426,18 @@ class PopupUI {
         const password = document.getElementById('config-password').value.trim();
         const apikey = document.getElementById('config-apikey').value.trim();
 
-        if (!url) {
-            this.showStatus('config', 'Digite a URL do servidor', 'error');
-            return;
-        }
+        if (!url) { this.showStatus('config', 'Digite a URL do servidor', 'error'); return; }
 
         this.showStatus('config', 'Testando conexão...', 'info');
-
         try {
             const testApi = new TeamPassAPI(url);
-
-            // Verificar se o servidor é alcançável
             let pingOk = false;
             try {
                 const pingResponse = await fetch(`${testApi.apiUrl}/authorize`, { method: 'GET' });
                 pingOk = [200, 400, 401, 405, 422].includes(pingResponse.status);
-                if (!pingOk) {
-                    this.showStatus('config', `Servidor retornou erro ${pingResponse.status}`, 'error');
-                    return;
-                }
-            } catch (e) {
-                this.showStatus('config', 'Servidor inacessível: ' + e.message, 'error');
-                return;
-            }
+                if (!pingOk) { this.showStatus('config', `Servidor retornou erro ${pingResponse.status}`, 'error'); return; }
+            } catch (e) { this.showStatus('config', 'Servidor inacessível: ' + e.message, 'error'); return; }
 
-            // Se tem credenciais preenchidas, testar autenticação completa
             if (username && password && apikey) {
                 this.showStatus('config', 'Servidor OK. Testando autenticação...', 'info');
                 const result = await testApi.authenticate(username, password, apikey);
@@ -449,7 +448,7 @@ class PopupUI {
                     this.showStatus('config', `Servidor OK, autenticação falhou: ${result.error}`, 'error');
                 }
             } else {
-                this.showStatus('config', 'Servidor acessível! Preencha as credenciais para testar.', 'success');
+                this.showStatus('config', 'Servidor acessível! Preencha as credenciais.', 'success');
             }
         } catch (error) {
             this.showStatus('config', 'Erro: ' + error.message, 'error');
@@ -463,31 +462,21 @@ class PopupUI {
         const apikey = document.getElementById('config-apikey').value.trim();
 
         if (!url || !username || !password || !apikey) {
-            this.showStatus('config', 'Preencha todos os campos', 'error');
-            return;
+            this.showStatus('config', 'Preencha todos os campos', 'error'); return;
         }
 
         const config = { api_url: url, username, password, apikey };
         await AppState.save('config', config);
         this.api = new TeamPassAPI(url);
-
         this.showStatus('config', 'Conectando ao TeamPass...', 'info');
         await this.autoLogin(config);
     }
 
     async autoLogin(config) {
-        if (!this.api) {
-            this.api = new TeamPassAPI(config.api_url);
-        }
-
+        if (!this.api) this.api = new TeamPassAPI(config.api_url);
         const result = await this.api.authenticate(config.username, config.password, config.apikey);
-
         if (result.success) {
-            await AppState.save('session', {
-                token: this.api.token,
-                user: result.user
-            });
-
+            await AppState.save('session', { token: this.api.token, user: result.user });
             this.showMainScreen(result.user);
             await this.refreshCredentials();
         } else {
@@ -506,101 +495,176 @@ class PopupUI {
     async showMainScreen(user) {
         this.showScreen('main');
         document.getElementById('user-name').textContent = user.username;
-        
-        // Pegar URL da aba ativa
+
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab && tab.url) {
             this.currentUrl = tab.url;
-            document.getElementById('current-url').textContent = this.currentUrl;
-            document.getElementById('current-url-info').style.display = 'block';
+            try {
+                const hostname = new URL(tab.url).hostname;
+                document.getElementById('site-url-text').textContent = hostname;
+                document.getElementById('site-url-bar').style.display = 'flex';
+            } catch (e) {}
         }
 
-        this.renderCredentials();
+        this.renderAll();
     }
 
     async refreshCredentials() {
-        const listEl = document.getElementById('credentials-list');
-        listEl.innerHTML = '<div class="loading">🔄 Carregando credenciais...</div>';
+        const siteEl = document.getElementById('site-credentials');
+        const allEl = document.getElementById('all-credentials');
+        const foldersEl = document.getElementById('folders-list');
+
+        const loadingHtml = '<div class="loading"><div class="loading-spinner"></div><div>Carregando credenciais...</div></div>';
+        siteEl.innerHTML = loadingHtml;
+        allEl.innerHTML = loadingHtml;
+        foldersEl.innerHTML = loadingHtml;
 
         try {
-            this.credentials = await this.api.getAllItems((current, total) => {
-                listEl.innerHTML = `<div class="loading">Carregando... ${current}/${total}</div>`;
+            const rawCredentials = await this.api.getAllItems((current, total) => {
+                const msg = `<div class="loading"><div class="loading-spinner"></div><div>Carregando... ${current}/${total}</div></div>`;
+                siteEl.innerHTML = msg;
             });
-
+            this.credentials = deduplicateCredentials(rawCredentials);
             await AppState.save('credentials', this.credentials);
-            this.renderCredentials();
+            this.renderAll();
         } catch (error) {
-            listEl.innerHTML = `<div class="no-credentials"><p>❌ Erro ao carregar credenciais</p><p>${error.message}</p></div>`;
+            const errHtml = `<div class="empty-state"><div class="empty-state-text">Erro ao carregar credenciais<br>${this.escapeHtml(error.message)}</div></div>`;
+            siteEl.innerHTML = errHtml;
+            allEl.innerHTML = errHtml;
         }
     }
 
-    renderCredentials(filter = '') {
-        const listEl = document.getElementById('credentials-list');
-        
+    renderAll() {
+        this.renderSiteTab();
+        this.renderFoldersTab();
+        this.renderAllTab();
+        document.getElementById('credentials-count').textContent = `${this.credentials.length} credencia${this.credentials.length !== 1 ? 'is' : 'l'}`;
+    }
+
+    // ── Tab: Para este site ──
+    renderSiteTab() {
+        const el = document.getElementById('site-credentials');
         if (this.credentials.length === 0) {
-            listEl.innerHTML = '<div class="no-credentials"><p>Nenhuma credencial encontrada</p></div>';
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-text">Nenhuma credencial carregada</div></div>';
             return;
         }
 
-        // Filtrar credenciais
+        const withScores = this.credentials.map(c => ({ ...c, matchScore: matchCredential(c, this.currentUrl) }));
+        const matched = withScores.filter(c => c.matchScore > 0).sort((a, b) => b.matchScore - a.matchScore);
+
+        if (matched.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🌐</div><div class="empty-state-text">Nenhuma credencial corresponde a este site.<br>Use a aba "Todas" para buscar.</div></div>';
+            return;
+        }
+
+        el.innerHTML = matched.map(c => this.renderCredItem(c, true)).join('');
+        this.attachListeners(el);
+    }
+
+    // ── Tab: Pastas ──
+    renderFoldersTab() {
+        const el = document.getElementById('folders-list');
+        if (this.credentials.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📁</div><div class="empty-state-text">Nenhuma credencial carregada</div></div>';
+            return;
+        }
+
+        // Agrupar por pasta
+        const folders = {};
+        this.credentials.forEach(c => {
+            const folder = c.folder || 'Sem pasta';
+            if (!folders[folder]) folders[folder] = [];
+            folders[folder].push(c);
+        });
+
+        // Ordenar pastas alfabeticamente
+        const sortedFolders = Object.keys(folders).sort((a, b) => {
+            if (a === 'Sem pasta') return 1;
+            if (b === 'Sem pasta') return -1;
+            return a.localeCompare(b);
+        });
+
+        el.innerHTML = sortedFolders.map(folderName => {
+            const items = folders[folderName];
+            return `
+                <div class="folder-group">
+                    <div class="folder-header">
+                        <span class="folder-icon">📁</span>
+                        <span class="folder-name">${this.escapeHtml(folderName)}</span>
+                        <span class="folder-count">${items.length}</span>
+                        <span class="folder-arrow">▶</span>
+                    </div>
+                    <div class="folder-items">
+                        ${items.map(c => this.renderCredItem(c, false)).join('')}
+                    </div>
+                </div>`;
+        }).join('');
+
+        // Toggle folders
+        el.querySelectorAll('.folder-header').forEach(header => {
+            header.addEventListener('click', () => {
+                header.parentElement.classList.toggle('open');
+            });
+        });
+
+        this.attachListeners(el);
+    }
+
+    // ── Tab: Todas ──
+    renderAllTab(filter = '') {
+        const el = document.getElementById('all-credentials');
+        if (this.credentials.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔐</div><div class="empty-state-text">Nenhuma credencial carregada</div></div>';
+            return;
+        }
+
         let filtered = this.credentials;
         if (filter) {
-            const filterLower = filter.toLowerCase();
-            filtered = this.credentials.filter(c => 
-                c.label.toLowerCase().includes(filterLower) ||
-                c.url.toLowerCase().includes(filterLower) ||
-                c.login.toLowerCase().includes(filterLower)
+            const f = filter.toLowerCase();
+            filtered = this.credentials.filter(c =>
+                c.label.toLowerCase().includes(f) ||
+                c.login.toLowerCase().includes(f) ||
+                (c.url || '').toLowerCase().includes(f) ||
+                (c.folder || '').toLowerCase().includes(f)
             );
         }
 
-        // Calcular match scores e ordenar
-        const withScores = filtered.map(cred => ({
-            ...cred,
-            matchScore: matchCredential(cred, this.currentUrl)
-        }));
+        if (filtered.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-text">Nenhum resultado encontrado</div></div>';
+            return;
+        }
 
-        withScores.sort((a, b) => b.matchScore - a.matchScore);
-
-        // Renderizar
-        listEl.innerHTML = withScores.map(cred => this.renderCredentialItem(cred)).join('');
-
-        // Atualizar contador
-        document.getElementById('credentials-count').textContent = 
-            `${filtered.length} credencia${filtered.length !== 1 ? 'is' : 'l'}`;
-
-        // Adicionar event listeners
-        this.attachCredentialListeners();
+        el.innerHTML = filtered.map(c => this.renderCredItem(c, false)).join('');
+        this.attachListeners(el);
     }
 
-    renderCredentialItem(cred) {
-        const isMatched = cred.matchScore > 0.3;
-        const showScore = cred.matchScore > 0;
+    // ── Render credential item ──
+    renderCredItem(cred, showScore) {
+        const scoreHtml = showScore && cred.matchScore > 0
+            ? `<span class="cred-item-score">${cred.matchScore}%</span>` : '';
+        const isMatched = showScore && cred.matchScore > 30;
 
         return `
-            <div class="credential-item ${isMatched ? 'matched' : ''}" data-id="${cred.id}">
-                <div class="credential-header">
-                    <div class="credential-label">${this.escapeHtml(cred.label)}</div>
-                    ${showScore ? `<div class="match-score">${Math.round(cred.matchScore * 100)}%</div>` : ''}
+            <div class="cred-item ${isMatched ? 'matched' : ''}" data-id="${cred.id}">
+                <div class="cred-item-top">
+                    <span class="cred-item-label">${this.escapeHtml(cred.label || cred.login)}</span>
+                    ${scoreHtml}
                 </div>
-                <div class="credential-details">
-                    👤 ${this.escapeHtml(cred.login)}
-                    ${cred.folder ? `<br>📁 ${this.escapeHtml(cred.folder)}` : ''}
+                <div class="cred-item-user">${this.escapeHtml(cred.login)}</div>
+                ${cred.folder ? `<div class="cred-item-folder">📁 ${this.escapeHtml(cred.folder)}</div>` : ''}
+                <div class="cred-item-actions">
+                    <button class="cred-action" data-type="both">Preencher</button>
+                    <button class="cred-action" data-type="user">Usuário</button>
+                    <button class="cred-action" data-type="password">Senha</button>
                 </div>
-                ${cred.url ? `<div class="credential-url">🔗 ${this.escapeHtml(cred.url)}</div>` : ''}
-                <div class="credential-actions">
-                    <button class="action-btn autofill-btn" data-type="both">🔐 Preencher Tudo</button>
-                    <button class="action-btn autofill-btn" data-type="user">👤 Usuário</button>
-                    <button class="action-btn autofill-btn" data-type="password">🔑 Senha</button>
-                </div>
-            </div>
-        `;
+            </div>`;
     }
 
-    attachCredentialListeners() {
-        document.querySelectorAll('.autofill-btn').forEach(btn => {
+    attachListeners(container) {
+        container.querySelectorAll('.cred-action').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const item = e.target.closest('.credential-item');
+                const item = e.target.closest('.cred-item');
                 const credId = item.dataset.id;
                 const fillType = e.target.dataset.type;
                 this.autofillCredential(credId, fillType);
@@ -612,31 +676,72 @@ class PopupUI {
         const cred = this.credentials.find(c => c.id == credId);
         if (!cred) return;
 
-        // Pegar aba ativa
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab) return;
 
-        // Enviar mensagem para o content script
         try {
             await chrome.tabs.sendMessage(tab.id, {
                 action: 'autofill',
-                data: {
-                    login: cred.login,
-                    password: cred.password,
-                    fillType: fillType
-                }
+                data: { login: cred.login, password: cred.password, fillType }
             });
-
-            // Fechar popup após autofill
-            window.close();
+            this.showToast('Credencial preenchida!');
+            setTimeout(() => window.close(), 600);
         } catch (error) {
-            console.error('Erro ao autofill:', error);
-            alert('Erro ao preencher. Certifique-se de que está em uma página web válida.');
+            this.showToast('Erro ao preencher. Verifique se está em uma página web.');
         }
     }
 
-    filterCredentials(searchTerm) {
-        this.renderCredentials(searchTerm);
+    showToast(message) {
+        const existing = document.querySelector('.copy-toast');
+        if (existing) existing.remove();
+        const toast = document.createElement('div');
+        toast.className = 'copy-toast';
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 2000);
+    }
+
+    // ── Blacklist de sites excluidos ──
+    async renderBlacklist() {
+        const el = document.getElementById('blacklist-list');
+        if (!el) return;
+
+        const data = await new Promise(resolve => chrome.storage.local.get('save_password_blacklist', resolve));
+        const blacklist = data.save_password_blacklist || [];
+
+        if (blacklist.length === 0) {
+            el.innerHTML = '<div class="blacklist-empty">Nenhum site excluido</div>';
+            return;
+        }
+
+        el.innerHTML = blacklist.map(domain => `
+            <div class="blacklist-item" data-domain="${this.escapeHtml(domain)}">
+                <span class="blacklist-item-domain">${this.escapeHtml(domain)}</span>
+                <button class="blacklist-item-remove" title="Remover">&times;</button>
+            </div>
+        `).join('');
+
+        el.querySelectorAll('.blacklist-item-remove').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const item = e.target.closest('.blacklist-item');
+                const domain = item.dataset.domain;
+                this.removeFromBlacklist(domain);
+            });
+        });
+    }
+
+    async removeFromBlacklist(domain) {
+        const data = await new Promise(resolve => chrome.storage.local.get('save_password_blacklist', resolve));
+        const blacklist = (data.save_password_blacklist || []).filter(d => d !== domain);
+        await new Promise(resolve => chrome.storage.local.set({ save_password_blacklist: blacklist }, resolve));
+        this.renderBlacklist();
+        this.showToast(`${domain} removido da lista`);
+    }
+
+    async clearBlacklist() {
+        await new Promise(resolve => chrome.storage.local.set({ save_password_blacklist: [] }, resolve));
+        this.renderBlacklist();
+        this.showToast('Lista de excluidos limpa');
     }
 
     escapeHtml(text) {

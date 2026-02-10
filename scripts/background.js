@@ -114,9 +114,8 @@ chrome.commands.onCommand.addListener((command) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('Mensagem recebida no background:', message);
-    
+
     if (message.action === 'notify') {
-        // Criar notificação
         chrome.notifications.create({
             type: 'basic',
             iconUrl: 'icons/icon128.png',
@@ -124,9 +123,308 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             message: message.message
         });
     }
-    
+
+    if (message.action === 'save_credential') {
+        saveCredentialToTeamPass(message.data).then(result => {
+            sendResponse(result);
+        }).catch(error => {
+            sendResponse({ success: false, error: error.message });
+        });
+        return true;
+    }
+
+    if (message.action === 'get_folders') {
+        fetchTeamPassFolders().then(result => {
+            sendResponse(result);
+        }).catch(error => {
+            sendResponse({ success: false, folders: [], error: error.message });
+        });
+        return true;
+    }
+
     return true;
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// SALVAR CREDENCIAL NO TEAMPASS
+// ════════════════════════════════════════════════════════════════════════════
+
+function extractDomain(url) {
+    if (!url) return '';
+    try {
+        return new URL(url).hostname.replace('www.', '').toLowerCase();
+    } catch (e) {
+        return url.replace(/https?:\/\//, '').split('/')[0].replace('www.', '').toLowerCase();
+    }
+}
+
+async function fetchTeamPassFolders() {
+    const { config, session } = await chrome.storage.local.get(['config', 'session']);
+
+    if (!config || !config.api_url) {
+        return { success: false, folders: [] };
+    }
+
+    const baseUrl = config.api_url.replace(/\/$/, '');
+    const apiUrl = `${baseUrl}/api/index.php`;
+    let token = session ? session.token : null;
+
+    // Se nao tem token, tentar autenticar
+    if (!token && config.username && config.password && config.apikey) {
+        const authResult = await backgroundAuthenticate(apiUrl, config);
+        if (authResult.token) token = authResult.token;
+    }
+
+    const folders = [];
+
+    // Estrategia 1: API legada - /read/userfolders/all
+    if (config.apikey) {
+        try {
+            const foldersUrl = `${apiUrl}/read/userfolders/all?apikey=${encodeURIComponent(config.apikey)}`;
+            const response = await fetch(foldersUrl);
+            if (response.ok) {
+                const data = await response.json();
+                if (Array.isArray(data)) {
+                    data.forEach(f => {
+                        if (f && (f.id || f.id === 0)) {
+                            folders.push({ id: f.id, title: f.title || f.name || f.label || `Pasta ${f.id}` });
+                        }
+                    });
+                } else if (typeof data === 'object') {
+                    Object.entries(data).forEach(([key, val]) => {
+                        if (!isNaN(key)) {
+                            folders.push({ id: parseInt(key), title: (typeof val === 'string' ? val : val.title || val.name || `Pasta ${key}`) });
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.log('[Background] Erro ao buscar pastas (legacy):', e.message);
+        }
+    }
+
+    // Estrategia 2: JWT - /folders
+    if (folders.length === 0 && token) {
+        try {
+            const response = await fetch(`${apiUrl}/folders`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                if (Array.isArray(data)) {
+                    data.forEach(f => {
+                        if (f && (f.id || f.id === 0)) {
+                            folders.push({ id: f.id, title: f.title || f.name || f.label || `Pasta ${f.id}` });
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.log('[Background] Erro ao buscar pastas (JWT):', e.message);
+        }
+    }
+
+    // Estrategia 3: Extrair pastas unicas das credenciais salvas localmente
+    if (folders.length === 0) {
+        const { credentials } = await chrome.storage.local.get('credentials');
+        if (credentials && credentials.length > 0) {
+            const seen = new Set();
+            credentials.forEach(cred => {
+                if (cred.folder && !seen.has(cred.folder)) {
+                    seen.add(cred.folder);
+                    folders.push({ id: cred.folder, title: cred.folder });
+                }
+            });
+        }
+    }
+
+    console.log(`[Background] ${folders.length} pastas encontradas`);
+    return { success: true, folders };
+}
+
+async function saveCredentialToTeamPass(data) {
+    const { label, login, password, url, folderId } = data;
+    console.log('[Background] Salvando credencial:', { label, login, url, folderId });
+
+    const { config, session } = await chrome.storage.local.get(['config', 'session']);
+
+    if (!config || !config.api_url) {
+        return { success: false, error: 'Extensao nao configurada' };
+    }
+
+    const baseUrl = config.api_url.replace(/\/$/, '');
+    const apiUrl = `${baseUrl}/api/index.php`;
+    let token = session ? session.token : null;
+    let authMode = token ? 'jwt' : (config.apikey ? 'apikey' : null);
+
+    // Se nao tem token, tentar autenticar
+    if (!token && config.username && config.password && config.apikey) {
+        const authResult = await backgroundAuthenticate(apiUrl, config);
+        if (authResult.token) {
+            token = authResult.token;
+            authMode = 'jwt';
+        } else if (authResult.apikey) {
+            authMode = 'apikey';
+        } else {
+            return { success: false, error: 'Falha na autenticacao' };
+        }
+    }
+
+    const itemData = {
+        label: label || url,
+        login,
+        pwd: password,
+        url: url || '',
+        folder_id: folderId || 0
+    };
+
+    // Tentar salvar via API
+    let saveResult = null;
+
+    if (authMode === 'jwt' && token) {
+        // Estrategia 1: JWT + JSON
+        try {
+            const response = await fetch(`${apiUrl}/item`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(itemData)
+            });
+            if (response.ok) {
+                const result = await response.json();
+                saveResult = { success: true, itemId: result.id || result.item_id || null };
+            }
+        } catch (e) {
+            console.log('[Background] JWT json falhou:', e.message);
+        }
+
+        // Estrategia 2: JWT + form-urlencoded
+        if (!saveResult) {
+            try {
+                const response = await fetch(`${apiUrl}/item`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: new URLSearchParams(itemData)
+                });
+                if (response.ok) {
+                    const result = await response.json();
+                    saveResult = { success: true, itemId: result.id || result.item_id || null };
+                }
+            } catch (e) {
+                console.log('[Background] JWT form falhou:', e.message);
+            }
+        }
+    }
+
+    if (!saveResult && authMode === 'apikey' && config.apikey) {
+        // Estrategia 3: API legada
+        try {
+            const encoded = btoa(new TextEncoder().encode(JSON.stringify(itemData)).reduce((s, b) => s + String.fromCharCode(b), ''));
+            const addUrl = `${apiUrl}/add/item/${encoded}?apikey=${encodeURIComponent(config.apikey)}`;
+            const response = await fetch(addUrl, { method: 'POST' });
+            if (response.ok) {
+                const result = await response.json();
+                saveResult = { success: true, itemId: result.id || result.item_id || null };
+            }
+        } catch (e) {
+            console.log('[Background] Legacy falhou:', e.message);
+        }
+    }
+
+    if (!saveResult) {
+        chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'icons/icon128.png',
+            title: 'Cofre de Senhas FGF',
+            message: 'Erro ao salvar credencial no TeamPass'
+        });
+        return { success: false, error: 'Nao foi possivel salvar no TeamPass' };
+    }
+
+    // Atualizar cache local de credenciais (com deduplicacao)
+    const { credentials } = await chrome.storage.local.get('credentials');
+    let currentCreds = credentials || [];
+
+    const newCred = {
+        id: saveResult.itemId || `local-${Date.now()}`,
+        label: itemData.label,
+        login: itemData.login,
+        password: itemData.pwd,
+        url: itemData.url,
+        folder: data.folderName || ''
+    };
+
+    // Remover duplicatas: mesmo login + mesmo dominio
+    const newDomain = extractDomain(newCred.url);
+    currentCreds = currentCreds.filter(existing => {
+        if (existing.login !== newCred.login) return true;
+        const existingDomain = extractDomain(existing.url);
+        return existingDomain !== newDomain;
+    });
+
+    currentCreds.push(newCred);
+    await chrome.storage.local.set({ credentials: currentCreds });
+
+    chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Cofre de Senhas FGF',
+        message: `Credencial para ${login} salva com sucesso!`
+    });
+
+    return saveResult;
+}
+
+async function backgroundAuthenticate(apiUrl, config) {
+    const authUrl = `${apiUrl}/authorize`;
+    const strategies = [
+        { label: 'form-urlencoded', options: {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ login: config.username, password: config.password, apikey: config.apikey })
+        }},
+        { label: 'json', options: {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ login: config.username, password: config.password, apikey: config.apikey })
+        }}
+    ];
+
+    for (const strategy of strategies) {
+        try {
+            const response = await fetch(authUrl, strategy.options);
+            if (response.ok) {
+                const result = await response.json();
+                if (result.token) {
+                    // Atualizar sessao
+                    const payload = JSON.parse(atob(result.token.split('.')[1]));
+                    await chrome.storage.local.set({
+                        session: { token: result.token, user: { username: payload.username || config.username } }
+                    });
+                    return { token: result.token };
+                }
+            }
+        } catch (e) {
+            console.log(`[Background] Auth ${strategy.label} falhou:`, e.message);
+        }
+    }
+
+    // Fallback legada
+    if (config.apikey) {
+        try {
+            const legacyUrl = `${apiUrl}/read/userpw/${encodeURIComponent(config.username)}?apikey=${encodeURIComponent(config.apikey)}`;
+            const response = await fetch(legacyUrl);
+            if (response.ok) return { apikey: true };
+        } catch (e) {}
+    }
+
+    return {};
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // BADGE (CONTADOR NO ÍCONE)

@@ -10,7 +10,10 @@
     <!-- Tela de Configuração -->
     <div id="config-screen" class="screen" style="display: none;">
         <div class="header">
-            <h2>⚙️ Configuração</h2>
+            <div class="header-brand">
+                <img src="icons/icon32.png" alt="Logo" class="header-logo" />
+                <span class="header-title">Cofre de Senhas</span>
+            </div>
         </div>
         <div class="content">
             <div class="form-group">
@@ -34,37 +37,77 @@
                 <button id="test-connection" class="btn btn-secondary">Testar Conexão</button>
                 <button id="save-config" class="btn btn-primary">Salvar e Conectar</button>
             </div>
+
+            <!-- Sites excluidos do salvamento automatico -->
+            <div class="blacklist-section" id="blacklist-section">
+                <div class="blacklist-header">
+                    <span class="blacklist-title">Sites excluidos</span>
+                    <button id="blacklist-clear-all" class="btn-link" title="Limpar todos">Limpar todos</button>
+                </div>
+                <div id="blacklist-list" class="blacklist-list">
+                    <div class="blacklist-empty">Nenhum site excluido</div>
+                </div>
+            </div>
         </div>
     </div>
 
     <!-- Tela Principal -->
     <div id="main-screen" class="screen" style="display: none;">
         <div class="header">
-            <h2>🔑 Credenciais</h2>
-            <div class="user-info">
-                <span id="user-name"></span>
-                <button id="logout-btn" class="btn-icon" title="Sair">🚪</button>
+            <div class="header-brand">
+                <img src="icons/icon32.png" alt="Logo" class="header-logo" />
+                <span class="header-title">Cofre de Senhas</span>
+            </div>
+            <div class="header-actions">
+                <span id="user-name" class="user-badge"></span>
+                <button id="refresh-btn" class="btn-icon" title="Atualizar">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L10 6h6V0l-2.35 2.35z"/></svg>
+                </button>
+                <button id="settings-btn" class="btn-icon" title="Configurações">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm6.32-2.76l1.68 1.32-2 3.46-1.94-.78a5.93 5.93 0 0 1-1.32.76L10.36 14H6.36l-.38-2a5.93 5.93 0 0 1-1.32-.76l-1.94.78-2-3.46 1.68-1.32a6.06 6.06 0 0 1 0-1.48L.72 5.44l2-3.46 1.94.78A5.93 5.93 0 0 1 6 2V0h4v2c.47.2.91.45 1.32.76l1.94-.78 2 3.46-1.68 1.32a6.06 6.06 0 0 1 0 1.48z"/></svg>
+                </button>
+                <button id="logout-btn" class="btn-icon" title="Desconectar">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 2v2H2v8h4v2H0V2h6zm4.5 2L14 8l-3.5 4V9H5V7h5.5V4z"/></svg>
+                </button>
             </div>
         </div>
-        
-        <div class="toolbar">
-            <input type="text" id="search-box" placeholder="🔍 Buscar credenciais..." />
-            <button id="refresh-btn" class="btn-icon" title="Atualizar">🔄</button>
+
+        <!-- Navegação por abas -->
+        <div class="tabs">
+            <button class="tab active" data-tab="site">Para este site</button>
+            <button class="tab" data-tab="folders">Pastas</button>
+            <button class="tab" data-tab="all">Todas</button>
         </div>
 
-        <div id="current-url-info" class="url-info" style="display: none;">
-            <div class="url-label">📍 Página atual:</div>
-            <div class="url-value" id="current-url"></div>
+        <!-- Conteúdo: Para este site -->
+        <div id="tab-site" class="tab-content active">
+            <div id="site-url-bar" class="site-url-bar" style="display:none;">
+                <span class="site-url-icon">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm0 14.5a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13zM7 4h2v5H7V4zm0 6h2v2H7v-2z"/></svg>
+                </span>
+                <span id="site-url-text" class="site-url-text"></span>
+            </div>
+            <div id="site-credentials" class="cred-list"></div>
         </div>
 
-        <div id="credentials-list" class="credentials-list">
-            <div class="loading">Carregando credenciais...</div>
+        <!-- Conteúdo: Pastas -->
+        <div id="tab-folders" class="tab-content">
+            <div id="folders-list" class="folders-list"></div>
         </div>
 
+        <!-- Conteúdo: Todas -->
+        <div id="tab-all" class="tab-content">
+            <div class="search-bar">
+                <svg class="search-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11.74 10.32a6.5 6.5 0 1 0-1.42 1.42l4.24 4.24 1.42-1.42-4.24-4.24zM6.5 11A4.5 4.5 0 1 1 11 6.5 4.5 4.5 0 0 1 6.5 11z"/></svg>
+                <input type="text" id="search-box" placeholder="Buscar credenciais..." />
+            </div>
+            <div id="all-credentials" class="cred-list"></div>
+        </div>
+
+        <!-- Footer -->
         <div class="footer">
-            <div class="stats">
-                <span id="credentials-count">0 credenciais</span>
-            </div>
+            <span id="credentials-count">0 credenciais</span>
+            <span class="footer-brand">Grupo FGF T.I</span>
         </div>
     </div>
 
