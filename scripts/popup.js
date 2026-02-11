@@ -284,6 +284,26 @@ function deduplicateCredentials(creds) {
     return Array.from(seen.values()).reverse();
 }
 
+const IGNORED_DOMAIN_PARTS = new Set([
+    'com', 'net', 'org', 'edu', 'gov', 'mil', 'int',
+    'br', 'pt', 'us', 'uk', 'eu', 'io', 'co', 'info', 'biz',
+    'www', 'http', 'https', 'auth', 'login', 'signin', 'app',
+    'portal', 'web', 'site', 'page', 'online', 'cloud'
+]);
+
+// Verificar se domain e exatamente candidateHost ou um subdominio dele
+function isDomainMatch(domain, candidateHost) {
+    if (!domain || !candidateHost) return false;
+    if (domain === candidateHost) return true;
+    return domain.endsWith('.' + candidateHost);
+}
+
+// Verificar se o host e um sufixo publico (com.br, co.uk, etc.)
+function isPublicSuffix(host, ignoredSet) {
+    const firstLabel = host.split('.')[0];
+    return ignoredSet.has(firstLabel);
+}
+
 function matchCredential(credential, currentUrl) {
     if (!currentUrl) return 0;
     const credUrl = (credential.url || '').toLowerCase();
@@ -292,12 +312,39 @@ function matchCredential(credential, currentUrl) {
     try { domain = new URL(currentUrl).hostname.replace('www.', '').toLowerCase(); } catch (e) { domain = currentUrl.toLowerCase(); }
 
     let score = 0;
+
+    // Match exato: URL da credencial contem o dominio completo
     if (credUrl && credUrl.includes(domain)) score = Math.max(score, 100);
-    const credDomain = credUrl.replace(/https?:\/\//, '').split('/')[0];
-    if (credDomain && domain.includes(credDomain)) score = Math.max(score, 80);
-    const domainBase = domain.split('.')[0];
-    if (domainBase.length > 2 && credLabel.includes(domainBase)) score = Math.max(score, 50);
-    if (domainBase.length > 2 && credUrl.includes(domainBase)) score = Math.max(score, 40);
+
+    // Match reverso: dominio atual e subdominio do host da credencial
+    const credHost = credUrl.replace(/https?:\/\//, '').split('/')[0].replace('www.', '').toLowerCase();
+    if (credHost && credHost.length > 4 && !isPublicSuffix(credHost, IGNORED_DOMAIN_PARTS) && isDomainMatch(domain, credHost)) {
+        score = Math.max(score, 80);
+    }
+
+    // Match por nome base do dominio (ex: "netshoes" de netshoes.com.br)
+    // Pular prefixos comuns (login, auth, app, etc.) para achar o nome real
+    const domainParts = domain.split('.');
+    let domainBase = '';
+    for (const part of domainParts) {
+        if (part.length > 3 && !IGNORED_DOMAIN_PARTS.has(part)) {
+            domainBase = part;
+            break;
+        }
+    }
+    if (domainBase) {
+        if (credLabel.includes(domainBase)) score = Math.max(score, 50);
+        const credHostParts = credHost.split('.');
+        let credDomainBase = '';
+        for (const part of credHostParts) {
+            if (part.length > 3 && !IGNORED_DOMAIN_PARTS.has(part)) {
+                credDomainBase = part;
+                break;
+            }
+        }
+        if (credDomainBase === domainBase) score = Math.max(score, 40);
+    }
+
     return score;
 }
 

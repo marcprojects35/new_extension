@@ -26,8 +26,7 @@
 
 body {
     width: 380px;
-    min-height: 480px;
-    max-height: 580px;
+    height: 580px;
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
     background: var(--bg-main);
     color: var(--text-primary);

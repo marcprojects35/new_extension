@@ -959,7 +959,7 @@
                     }
                 } catch (e) {}
 
-                // TODOS os eventos possíveis
+                // TODOS os eventos poss��veis
                 const allEvents = [
                     'focus', 'click', 'mousedown', 'mouseup',
                     'keydown', 'keypress', 'keyup',
@@ -1395,6 +1395,19 @@
     let pendingPasswordCred = null; // Credencial aguardando campo de senha (login multi-step)
     let lastDetectedPasswordField = null; // Referência ao último campo de senha detectado
 
+    // Verificar se domain e exatamente candidateHost ou um subdominio dele
+    function isDomainMatch(domain, candidateHost) {
+        if (!domain || !candidateHost) return false;
+        if (domain === candidateHost) return true;
+        return domain.endsWith('.' + candidateHost);
+    }
+
+    // Verificar se o host e um sufixo publico (com.br, co.uk, etc.)
+    function isPublicSuffix(host, ignoredSet) {
+        const firstLabel = host.split('.')[0];
+        return ignoredSet.has(firstLabel);
+    }
+
     // Buscar credenciais do storage
     // Deduplicar credenciais: manter apenas a mais recente por login+dominio
     function deduplicateCredentials(creds) {
@@ -1433,21 +1446,52 @@
                     domain = currentUrl;
                 }
 
+                // TLDs e partes comuns que nao devem contar no matching
+                const ignoredParts = new Set([
+                    'com', 'net', 'org', 'edu', 'gov', 'mil', 'int',
+                    'br', 'pt', 'us', 'uk', 'eu', 'io', 'co', 'info', 'biz',
+                    'www', 'http', 'https', 'auth', 'login', 'signin', 'app',
+                    'portal', 'web', 'site', 'page', 'online', 'cloud'
+                ]);
+
                 const withScores = allCreds.map(cred => {
                     const credUrl = (cred.url || '').toLowerCase();
                     const credLabel = (cred.label || '').toLowerCase();
                     const domainLower = domain.toLowerCase();
 
                     let score = 0;
-                    if (credUrl && credUrl.includes(domainLower)) score += 100;
-                    if (credUrl && domainLower.includes(credUrl.replace(/https?:\/\//, '').split('/')[0])) score += 80;
-                    if (credLabel.includes(domainLower.split('.')[0])) score += 50;
 
-                    const domainParts = domainLower.split('.').filter(p => p.length > 2);
-                    domainParts.forEach(part => {
-                        if (credLabel.includes(part)) score += 30;
-                        if (credUrl.includes(part)) score += 30;
-                    });
+                    // Match exato: URL da credencial contem o dominio completo
+                    if (credUrl && credUrl.includes(domainLower)) score += 100;
+
+                    // Match reverso: dominio atual e subdominio do host da credencial
+                    const credHost = credUrl.replace(/https?:\/\//, '').split('/')[0].replace('www.', '').toLowerCase();
+                    if (credHost && credHost.length > 4 && !isPublicSuffix(credHost, ignoredParts) && isDomainMatch(domainLower, credHost)) {
+                        score += 80;
+                    }
+
+                    // Match por nome base do dominio (ex: "netshoes" de netshoes.com.br)
+                    // Pular prefixos comuns (login, auth, app, etc.) para achar o nome real
+                    const domainParts = domainLower.split('.');
+                    let domainBase = '';
+                    for (const part of domainParts) {
+                        if (part.length > 3 && !ignoredParts.has(part)) {
+                            domainBase = part;
+                            break;
+                        }
+                    }
+                    if (domainBase) {
+                        if (credLabel.includes(domainBase)) score += 50;
+                        const credHostParts = credHost.split('.');
+                        let credDomainBase = '';
+                        for (const part of credHostParts) {
+                            if (part.length > 3 && !ignoredParts.has(part)) {
+                                credDomainBase = part;
+                                break;
+                            }
+                        }
+                        if (credDomainBase === domainBase) score += 40;
+                    }
 
                     return { ...cred, matchScore: score };
                 });
@@ -1644,24 +1688,11 @@
                     </div>
                 </div>`;
         } else if (all.length > 0) {
-            // Tem credenciais mas nenhuma corresponde - mostrar todas com busca
-            const items = all.slice(0, 8).map((cred, idx) => {
-                const credId = `cofre-cred-${idx}`;
-                credMap[credId] = { login: cred.login, password: cred.password };
-                return `
-                    <div class="cofre-cred-item" data-cred-id="${credId}">
-                        <div class="cofre-cred-label">${escapeHtmlForPopup(cred.label || cred.login)}</div>
-                        <div class="cofre-cred-user">${escapeHtmlForPopup(cred.login)}</div>
-                    </div>`;
-            }).join('');
-            content = `${headerHtml}
-                <div class="cofre-popup-body">
-                    <div class="cofre-popup-hint">Selecione uma credencial para preencher:</div>
-                    <div class="cofre-popup-search">
-                        <input type="text" id="cofre-popup-search" placeholder="Buscar credencial..." />
-                    </div>
-                    <div id="cofre-cred-list">${items}</div>
-                </div>`;
+            // Nenhuma credencial corresponde a este site
+            // Nao mostrar popup - o watcher de submit oferecera salvar apos o login
+            log('Nenhuma credencial para este site - aguardando submit para oferecer salvar');
+            autofillPopupShown = false;
+            return;
         } else if (hasConfig) {
             // Tem config mas não conseguiu carregar credenciais
             content = `${headerHtml}
@@ -2153,6 +2184,11 @@
         formDetected = true;
         lastDetectedPasswordField = passwordField;
 
+        // Configurar watcher de submit para capturar credenciais
+        if (passwordField && !formSubmitWatcherActive) {
+            setupFormSubmitWatcher(usernameField, passwordField);
+        }
+
         // Mostrar popup de autofill
         showAutofillPopup(usernameField, passwordField);
 
@@ -2290,10 +2326,14 @@
                 return;
             }
 
-            // Verificar se ja existe credencial para este dominio
+            // Verificar se ja existe credencial EXATA (mesmo login e senha) para este dominio
             const { matched } = await getStoredCredentials();
-            if (matched.length > 0) {
-                log('Ja existem credenciais para este dominio - nao oferecendo salvar');
+            const exactMatch = matched.some(cred =>
+                cred.login && cred.login.toLowerCase() === username.toLowerCase() &&
+                cred.password === password
+            );
+            if (exactMatch) {
+                log('Credencial exata ja existe para este dominio - nao oferecendo salvar');
                 return;
             }
 
@@ -2626,21 +2666,7 @@
         document.head.appendChild(style);
     }
 
-    // Integrar com detectLoginForm - adicionar watcher apos detectar formulario
-    const originalDetectLoginForm = detectLoginForm;
-    detectLoginForm = async function() {
-        await originalDetectLoginForm();
-
-        // Se formulario foi detectado, configurar watcher de submit
-        if (formDetected && !formSubmitWatcherActive) {
-            const detector = new FieldDetector();
-            const usernameField = detector.findUsernameField();
-            const passwordField = detector.findPasswordField();
-            if (passwordField) {
-                setupFormSubmitWatcher(usernameField, passwordField);
-            }
-        }
-    };
+    // Nota: setupFormSubmitWatcher agora e chamado diretamente dentro de detectLoginForm
 
     log('Sistema de captura de credenciais ativo');
 
